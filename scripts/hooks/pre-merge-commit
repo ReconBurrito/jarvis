@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuses a merge that would put secrets or site details into this public repository.
+# Turn the hooks on once per clone: git config core.hooksPath scripts/hooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/leak_gate.py"

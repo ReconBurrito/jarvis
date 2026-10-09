@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# Which version of Jarvis a container runs, and how that is checked. Sourced inside the container by
+# install/bootstrap.sh and bin/update.
+#
+# Two channels (JARVIS_RELEASE_CHANNEL in /etc/jarvis/site.env):
+#
+#   signed  A release is a tag that passes every one of these:
+#             1. its name is vX.Y.Z (plain numbers; no pre-release names);
+#             2. it is an annotated tag on a commit, and the name written inside the tag is the same name,
+#                so a signed tag cannot be republished under another name;
+#             3. its message starts with the line "Jarvis release vX.Y.Z";
+#             4. it carries an SSH signature made by a key pinned in /etc/jarvis/allowed_signers.
+#           The code is then taken from the commit named inside that checked tag, by its hash.
+#           A container never moves to an older release than the newest it has ever run.
+#   branch  The head of JARVIS_RELEASE_BRANCH, unchecked. For development.
+#
+# What is installed is recorded in /etc/jarvis/release, and only after an install passed its own check.
+# While an install is under way /etc/jarvis/release.pending exists; if it is still there afterwards, the
+# install was cut short. The remote's tags are kept under refs/jarvis/, mirrored exactly at every fetch, so
+# nothing left over from an earlier state of the remote can get in the way of a later one.
+
+export LC_ALL=C
+JARVIS_CHECKOUT="${JARVIS_CHECKOUT:-/opt/jarvis}"
+JARVIS_ETC="${JARVIS_ETC:-/etc/jarvis}"
+RELEASE_NAME=""
+RELEASE_COMMIT=""
+# Where git looks is decided here, not by variables of the shell this was started from.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+RELEASE_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+release_die() { printf 'jarvis: %s\n' "$*" >&2; exit 1; }
+release_note() { printf 'jarvis: %s\n' "$*" >&2; }
+
+# git reads no settings file of the machine or of root here, and the signature format, the program that
+# checks it and the list of trusted keys are given on the command line: nothing on the machine can swap them.
+# OpenPGP and X.509 signatures have no program to check them, so they can never count.
+release_git() {
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        git -C "$JARVIS_CHECKOUT" -c advice.detachedHead=false \
+        -c gpg.format=ssh -c gpg.ssh.program=ssh-keygen -c "gpg.ssh.allowedSignersFile=$JARVIS_ETC/allowed_signers" \
+        -c gpg.program=/bin/false -c gpg.openpgp.program=/bin/false -c gpg.x509.program=/bin/false "$@"
+}
+
+# release_clone URL: an empty checkout with the remote set; nothing is checked out until it is verified.
+release_clone() {
+    if [ ! -d "$JARVIS_CHECKOUT/.git" ]; then
+        install -d -m 0755 "$JARVIS_CHECKOUT"
+        release_git init -q
+        release_git remote add origin "$1"
+    elif [ "$(release_git remote get-url origin 2>/dev/null)" != "$1" ]; then
+        release_git remote set-url origin "$1"
+    fi
+}
+
+# Only what the channel needs is fetched: the release tags, or the one branch. The local copy is made equal
+# to the remote's (forced, pruned). That is safe because nothing fetched is trusted for being fetched: a tag
+# counts only after the checks below, and release_check_floor refuses a name that now stands for other code.
+release_fetch() {
+    local spec='+refs/tags/v*:refs/jarvis/tags/v*'
+    if [ "${JARVIS_RELEASE_CHANNEL:-signed}" = "branch" ]; then
+        spec="+refs/heads/${JARVIS_RELEASE_BRANCH:-main}:refs/jarvis/branch"
+    fi
+    release_git fetch -q --no-tags --prune origin "$spec" \
+        || release_die "could not fetch from $(release_git remote get-url origin). Nothing was changed."
+}
+
+release_has_signers() {
+    [ -r "$JARVIS_ETC/allowed_signers" ] && grep -Eqv '^[[:space:]]*(#|$)' "$JARVIS_ETC/allowed_signers"
+}
+
+# release_newer A B: true when release name A is a strictly higher version than B.
+release_newer() {
+    [ "$1" != "$2" ] \
+        && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" = "${1#v}" ]
+}
+
+# release_tag_commit TAG: prints the commit TAG stands for when TAG passes all four checks above; fails otherwise.
+release_tag_commit() {
+    local tag="$1" oid body
+    [[ "$tag" =~ $RELEASE_PATTERN ]] || return 1
+    oid="$(release_git rev-parse -q --verify "refs/jarvis/tags/$tag" 2>/dev/null)" || return 1
+    [ "$(release_git cat-file -t "$oid" 2>/dev/null)" = "tag" ] || return 1
+    [ "$(release_git cat-file -s "$oid")" -le 16384 ] || return 1
+    body="$(release_git cat-file tag "$oid")" || return 1
+    [ "$(sed -n '2p' <<<"$body")" = "type commit" ] || return 1
+    [ "$(sed -n '3p' <<<"$body")" = "tag $tag" ] || return 1
+    [ "$(awk 'seen {print; exit} /^$/ {seen = 1}' <<<"$body")" = "Jarvis release $tag" ] || return 1
+    grep -qx -- '-----BEGIN SSH SIGNATURE-----' <<<"$body" || return 1
+    if grep -Eq -- '-----BEGIN (PGP|SIGNED) ' <<<"$body"; then
+        return 1
+    fi
+    release_git verify-tag "$oid" >/dev/null 2>&1 || return 1
+    release_git rev-parse -q --verify "$oid^{commit}"
+}
+
+# Sets RELEASE_NAME and RELEASE_COMMIT to what this container should run.
+release_resolve() {
+    local channel="${JARVIS_RELEASE_CHANNEL:-signed}" tag commit ignored=0
+    RELEASE_NAME="" RELEASE_COMMIT=""
+    case "$channel" in
+        branch)
+            local branch="${JARVIS_RELEASE_BRANCH:-main}"
+            commit="$(release_git rev-parse -q --verify "refs/jarvis/branch^{commit}")" \
+                || release_die "branch $branch does not exist on the remote. Nothing was changed."
+            RELEASE_NAME="$branch@${commit:0:12}" RELEASE_COMMIT="$commit"
+            ;;
+        signed)
+            release_has_signers \
+                || release_die "no release signing key is pinned in $JARVIS_ETC/allowed_signers, so no release can be trusted. Nothing was changed."
+            while IFS= read -r tag; do
+                [ -n "$tag" ] || continue
+                if commit="$(release_tag_commit "$tag")"; then
+                    RELEASE_NAME="$tag" RELEASE_COMMIT="$commit"
+                    return 0
+                fi
+                ignored=$((ignored + 1))
+                if [ "$ignored" -le 5 ]; then
+                    release_note "release $tag is not a release signed by a pinned key; ignored."
+                elif [ "$ignored" -eq 6 ]; then
+                    release_note "more tags of that kind follow; they are ignored without a line each."
+                fi
+            done < <(release_git for-each-ref --format='%(refname:strip=3)' refs/jarvis/tags \
+                | grep -E "$RELEASE_PATTERN" | sed 's/^v//' | sort -t. -k1,1nr -k2,2nr -k3,3nr | sed 's/^/v/')
+            release_die "the remote has no release signed by a pinned key. Nothing was changed."
+            ;;
+        *) release_die "JARVIS_RELEASE_CHANNEL must be signed or branch, not '$channel'." ;;
+    esac
+}
+
+# What is installed: release_installed name, release_installed commit. Empty when nothing is.
+release_installed() {
+    [ -r "$JARVIS_ETC/release" ] || return 0
+    sed -n "s/^$1=//p" "$JARVIS_ETC/release" | head -n 1
+}
+
+# A record that is there but cannot be read as one is not guessed at: every command stops until it is put right.
+release_check_record() {
+    local floor
+    [ -e "$JARVIS_ETC/release" ] || [ -e "$JARVIS_ETC/release.floor" ] || return 0
+    if [ -e "$JARVIS_ETC/release" ]; then
+        [[ "$(release_installed commit)" =~ ^[0-9a-f]{40}$ ]] && [ -n "$(release_installed name)" ] \
+            || release_die "$JARVIS_ETC/release is damaged, so it is not known what is installed here. Nothing was changed. Run the installer on the Proxmox node again."
+    fi
+    for floor in "$(release_installed floor)" "$(cat "$JARVIS_ETC/release.floor" 2>/dev/null || true)"; do
+        [ -z "$floor" ] || [[ "$floor" =~ $RELEASE_PATTERN ]] \
+            || release_die "the record of the newest release run here is damaged ($JARVIS_ETC/release, $JARVIS_ETC/release.floor). Nothing was changed."
+    done
+}
+
+# The newest release this container has run. Kept twice, in the record and in a file of its own.
+release_floor() {
+    local a b
+    a="$(release_installed floor)"
+    b="$(cat "$JARVIS_ETC/release.floor" 2>/dev/null || true)"
+    if [ -n "$a" ] && [ -n "$b" ]; then
+        if release_newer "$b" "$a"; then a="$b"; fi
+    fi
+    printf '%s' "${a:-$b}"
+}
+
+# The resolved release must not be older than the newest release this container has run, and a release
+# name can never stand for other code than the code installed under that name.
+release_check_floor() {
+    local floor
+    [ "${JARVIS_RELEASE_CHANNEL:-signed}" = "signed" ] || return 0
+    if [ "$RELEASE_NAME" = "$(release_installed name)" ] && [ "$RELEASE_COMMIT" != "$(release_installed commit)" ]; then
+        release_die "release $RELEASE_NAME on the remote is not the $RELEASE_NAME installed here. Nothing was changed."
+    fi
+    floor="$(release_floor)"
+    if [ -n "$floor" ] && release_newer "$floor" "$RELEASE_NAME"; then
+        release_die "the newest signed release on the remote ($RELEASE_NAME) is older than one this container has run ($floor). Nothing was changed."
+    fi
+}
+
+release_write() {  # release_write FILE LINE...: all of it or nothing
+    local file="$1" tmp
+    shift
+    tmp="$(mktemp "$JARVIS_ETC/.release.XXXXXX")" || return 1
+    if printf '%s\n' "$@" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$file"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+release_record() {
+    local name="$1" commit="$2" floor
+    floor="$(release_floor)"
+    if [[ "$name" =~ $RELEASE_PATTERN ]]; then
+        if [ -z "$floor" ] || release_newer "$name" "$floor"; then
+            floor="$name"
+        fi
+    fi
+    # A name of its own for the installed code, so that git never clears it away while it is recorded,
+    # even when the tag it came from is gone from the remote.
+    release_git update-ref refs/jarvis/installed "$commit" || return 1
+    release_write "$JARVIS_ETC/release" "name=$name" "commit=$commit" "floor=$floor" || return 1
+    if [ -n "$floor" ]; then
+        release_write "$JARVIS_ETC/release.floor" "$floor" || return 1
+    fi
+    rm -f "$JARVIS_ETC/release.pending"
+}
+
+# The state of the code folder, in one word:
+#   none      nothing is recorded as installed
+#   pending   an install was cut short (it left its mark); the folder is put in order by the next install
+#   clean     exactly the installed release
+#   changed   not the installed release, or files in it were edited, added or removed by hand
+release_state() {
+    local head changed
+    [ -n "$(release_installed commit)" ] || { printf 'none'; return 0; }
+    [ ! -e "$JARVIS_ETC/release.pending" ] || { printf 'pending'; return 0; }
+    head="$(release_git rev-parse -q --verify HEAD 2>/dev/null || true)"
+    changed="$(release_git status --porcelain 2>/dev/null)" || { printf 'changed'; return 0; }
+    if [ "$head" = "$(release_installed commit)" ] && [ -z "$changed" ]; then
+        printf 'clean'
+    else
+        printf 'changed'
+    fi
+}
+
+# release_install NAME COMMIT SCRIPT: puts the code at COMMIT, runs that code's install script and then its
+# check, and only after both records NAME as installed. The code folder is made exactly the commit; the
+# caller decides beforehand whether that is allowed (release_state). Whatever differs from a commit at that
+# moment (edits by hand, leftovers of an install that failed) is put aside in a git stash first, never
+# dropped. An install script that leaves files in the code folder has failed. File descriptor 9 is the
+# update lock; nothing the install script starts may keep it.
+release_install() {
+    local name="$1" commit="$2" script="$3" left
+    release_write "$JARVIS_ETC/release.pending" "$commit" || return 1
+    if release_git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+        left="$(release_git status --porcelain)" || return 1
+        if [ -n "$left" ]; then
+            release_git -c user.name=Jarvis -c user.email=jarvis@localhost stash push -q -u \
+                -m "put aside before installing $name" || return 1
+            release_note "files in $JARVIS_CHECKOUT that differed from the release were put aside, not dropped. To see them: git -C $JARVIS_CHECKOUT stash list"
+        fi
+    fi
+    release_git checkout -q -f --detach "$commit" || return 1
+    release_git clean -q -fd || return 1
+    bash "$JARVIS_CHECKOUT/$script" 9>&- || return 1
+    bash "$JARVIS_CHECKOUT/$script" --check 9>&- || return 1
+    left="$(release_git status --porcelain)" || return 1
+    if [ -n "$left" ]; then
+        release_note "the install script of $name left or changed files in $JARVIS_CHECKOUT:"
+        printf '%s\n' "$left" >&2
+        return 1
+    fi
+    release_record "$name" "$commit"
+}

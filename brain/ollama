@@ -1,0 +1,4 @@
+# The Ollama release the brain installs, and the SHA-256 of its Linux archive (ollama-linux-amd64.tar.zst)
+# as published in that release's sha256sum.txt. The installer refuses an archive that does not match.
+version=v0.40.2
+sha256=726bee78706c281b0eeef00746efe51a044d71c592c3f0b195820707f31fdf04

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Stand-in for systemctl inside the "container": remembers what was enabled, and whether Ollama and Jarvis run.
+set -euo pipefail
+state="$STUB_STATE"
+printf 'systemctl %s\n' "$*" >> "$state/calls"
+case "$1" in
+    daemon-reload|reset-failed) ;;
+    enable)
+        [ ! -f "$state/no-docker" ] || [[ " $* " != *" docker "* ]] || exit 1
+        [ ! -f "$state/no-firewall-unit" ] || [[ " $* " != *" jarvis-desktop-firewall.service "* && " $* " != *" jarvis-firewall.service "* ]] || exit 1
+        for unit in "$@"; do
+            case "$unit" in enable|--now) ;; *) echo "$unit" >> "$state/enabled" ;; esac
+        done
+        ;;
+    disable)
+        [ "${*: -1}" = "jarvis.service" ] || exit 64
+        [ ! -f "$state/enabled" ] || sed -i '/^jarvis\.service$/d' "$state/enabled"
+        [[ " $* " != *" --now "* ]] || rm -f "$state/jarvis-running"
+        ;;
+    is-enabled)
+        if grep -qxF "$2" "$state/enabled" 2>/dev/null; then echo enabled; else echo disabled; exit 1; fi
+        ;;
+    restart)
+        case "$2" in
+            ollama)
+                [ ! -f "$state/ollama-wont-start" ] || exit 1
+                [ -x /usr/local/bin/ollama ] || exit 5
+                echo started >> "$state/ollama-starts"
+                : > "$state/ollama-running"
+                ;;
+            jarvis.service)
+                # A test steers Jarvis's own service with: jarvis-wont-start, jarvis-silent (runs, answers nothing).
+                [ ! -f "$state/jarvis-wont-start" ] || exit 1
+                echo started >> "$state/jarvis-starts"
+                : > "$state/jarvis-running"
+                ;;
+            *) exit 64 ;;
+        esac
+        ;;
+    stop) [ "$2" != "ollama" ] || rm -f "$state/ollama-running" ;;
+    is-active)
+        case "${*: -1}" in
+            ollama) [ -f "$state/ollama-running" ] ;;
+            jarvis.service) [ -f "$state/jarvis-running" ] ;;
+            *) exit 3 ;;
+        esac
+        ;;
+    *) exit 64 ;;
+esac

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Test stand-in for Proxmox's pct. State and a log of calls live in $STUB_STATE. `exec` and `push` act for
+# real on the test's private file system, which plays the part of the container under test.
+set -euo pipefail
+state="$STUB_STATE"
+printf 'pct %s\n' "$*" >> "$state/calls"
+cmd="$1"; shift
+id="${1:-}"
+case "$cmd" in
+    status)
+        [ -f "$state/ct-$id" ] || { echo "Configuration file 'nodes/test/lxc/$id.conf' does not exist" >&2; exit 2; }
+        echo "status: $(cat "$state/run-$id" 2>/dev/null || echo stopped)"
+        ;;
+    config)
+        [ -f "$state/ct-$id" ] || exit 2
+        cat "$state/ct-$id"
+        ;;
+    create)
+        [ ! -f "$state/fail-create" ] || { echo "pct create: refused by the test" >&2; exit 1; }
+        shift 2
+        description="" device=""
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--description" ]; then description="$2"; fi
+            if [ "$1" = "--dev0" ]; then device="$2"; fi
+            shift
+        done
+        printf 'description: %s\n' "$description" > "$state/ct-$id"
+        [ -z "$device" ] || printf 'dev0: %s\n' "$device" >> "$state/ct-$id"
+        # Proxmox keeps each container's settings in a file, the description as comment lines.
+        install -d /etc/pve/lxc
+        printf '#%s\n' "$description" > "/etc/pve/lxc/$id.conf"
+        ;;
+    start|reboot) echo running > "$state/run-$id" ;;
+    set)
+        if [ "${2:-}" = "--dev0" ]; then
+            sed -i '/^dev0: /d' "$state/ct-$id"
+            printf 'dev0: %s\n' "$3" >> "$state/ct-$id"
+        fi
+        ;;
+    push)
+        source_file="$2" target="$3" perms=0644
+        shift 3
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--perms" ]; then perms="$2"; fi
+            shift
+        done
+        install -m "$perms" "$source_file" "$target"
+        ;;
+    exec)
+        # The node's terminal is never handed to a container, whoever started the installer.
+        [ ! -t 0 ] || { echo "pct stub: the terminal was handed to container $id" >&2; exit 64; }
+        shift
+        while [ "$1" != "--" ]; do shift; done
+        shift
+        # Another container than the one under test (a brain the desktop is told about): a test puts its
+        # files in $STUB_STATE/files-ID, and only reading one of them is played.
+        if [ -d "$state/files-$id" ]; then
+            [ "$#" -eq 2 ] && [ "$1" = "cat" ] || { echo "pct stub: container $id is only read from" >&2; exit 64; }
+            exec cat "$state/files-$id$2"
+        fi
+        # A test can make one kind of command fail the way an unreachable container does.
+        if [ -s "$state/fail-exec" ] && grep -qF -- "$(cat "$state/fail-exec")" <<<"$*"; then
+            exit 255
+        fi
+        exec "$@"
+        ;;
+    *) echo "pct stub: no '$cmd'" >&2; exit 64 ;;
+esac

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Stand-in for nft inside the "container": remembers the rules that were loaded. A file is first tried
+# against the real nft, in a network of its own that is thrown away, wherever that is possible; what the
+# rules do once loaded is tested in tests/test_firewall.py.
+set -euo pipefail
+state="$STUB_STATE"
+printf 'nft %s\n' "$*" >> "$state/calls"
+real_says() {  # true when the real nft takes the file, or cannot be asked
+    [ -x /usr/sbin/nft ] && unshare -n /usr/sbin/nft list tables >/dev/null 2>&1 || return 0
+    unshare -n /usr/sbin/nft -c -f "$1"
+}
+case "$*" in
+    "-c -f "*) grep -Eq '^table inet jarvis_(desktop|brain) \{$' "$3" && real_says "$3" ;;
+    "-f "*)
+        [ ! -f "$state/fail-nft" ] || { echo "Error: Could not process rule" >&2; exit 1; }
+        if grep -q '^table inet jarvis_brain {$' "$2"; then cp "$2" "$state/nft-loaded-brain"; else cp "$2" "$state/nft-loaded"; fi
+        ;;
+    "list table inet jarvis_desktop") [ -f "$state/nft-loaded" ] ;;
+    "list table inet jarvis_brain") [ -f "$state/nft-loaded-brain" ] ;;
+    *) exit 64 ;;
+esac

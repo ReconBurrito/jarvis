@@ -1,0 +1,8 @@
+# Shell code must keep Unix line endings on every checkout, Windows included.
+* text=auto eol=lf
+*.sh text eol=lf
+*.func text eol=lf
+bin/* text eol=lf
+scripts/hooks/* text eol=lf
+*.ttf binary
+*.png binary

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stand-in for dpkg-query in the pretend container: every package is there already, whatever this machine
+# has, except one whose name says it is not (no-such-...). So the tests do not depend on this machine.
+case "${*: -1}" in
+    no-such-*) echo "dpkg-query: no packages found matching ${*: -1}" >&2; exit 1 ;;
+    *) printf 'install ok installed' ;;
+esac

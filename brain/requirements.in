@@ -1,0 +1,12 @@
+# What the brain needs from PyPI. brain/requirements.txt is made from this file, and the installer installs
+# exactly what that file names and nothing whose checksum differs:
+#
+#   uv pip compile --generate-hashes --no-header --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+#       brain/requirements.in -o brain/requirements.txt
+httpx>=0.27
+cryptography>=43
+# The switch has no API: it is read over SSH, its host key pinned.
+asyncssh>=2.14
+# The service the panel talks to.
+starlette>=0.40
+uvicorn>=0.30

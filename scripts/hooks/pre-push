@@ -1,0 +1,4 @@
+#!/bin/sh
+# Before anything leaves this machine, everything about to be sent is checked again, whichever way it got
+# into the history: files, their names, commit and tag messages, authors, and the names of the refs.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/leak_gate.py" --push "$1"

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Jarvis's mark: the panel's dial, reduced to what survives at the size of a browser tab. -->
+  <rect width="256" height="256" rx="56" fill="#04101a"/>
+  <g fill="none" stroke-linecap="butt">
+    <circle cx="128" cy="128" r="92" stroke="#1a4459" stroke-width="16"/>
+    <circle cx="128" cy="128" r="92" stroke="#5fd6ff" stroke-width="16" stroke-dasharray="390 188" transform="rotate(-90 128 128)"/>
+    <circle cx="128" cy="128" r="58" stroke="#d6f2ff" stroke-width="7" stroke-dasharray="120 244" transform="rotate(-90 128 128)" opacity=".9"/>
+  </g>
+  <circle cx="128" cy="128" r="17" fill="#5fd6ff"/>
+</svg>

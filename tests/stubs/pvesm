@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'pvesm %s\n' "$*" >> "$STUB_STATE/calls"
+if [ "$1 $2" = "status --storage" ]; then
+    # local holds templates, local-lvm and tank hold container disks, cold is switched off.
+    echo "Name             Type     Status           Total            Used       Available        %"
+    case "$3:${5:-}" in
+        local:vztmpl|local:) echo "local             dir     active       100       10        90   10.00%" ;;
+        local-lvm:rootdir|local-lvm:) echo "local-lvm     lvmthin     active       100       10        90   10.00%" ;;
+        tank:rootdir|tank:) echo "tank          zfspool     active       100       10        90   10.00%" ;;
+        cold:*) echo "cold              dir   disabled         0        0         0      N/A" ;;
+        local:*|local-lvm:*|tank:*) ;;
+        *) echo "No such storage '$3'" >&2; exit 2 ;;
+    esac
+    exit 0
+fi
+if [ "$1 $2" = "status --content" ]; then
+    echo "Name             Type     Status           Total            Used       Available        %"
+    case "$3" in
+        rootdir) echo "tank          zfspool     active       100       10        90   10.00%"
+                 echo "local-lvm     lvmthin     active       100       10        90   10.00%" ;;
+        vztmpl)  echo "local             dir     active       100       10        90   10.00%" ;;
+    esac
+    exit 0
+fi
+exit 64

@@ -1,0 +1,166 @@
+"""Jarvis put together from its settings: the model, the tools, the vault, the audit log and the turn loop. The
+jarvis command and the service both start from here, so both are the same Jarvis."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import httpx
+
+from .about import SURFACE, describe
+from .adapters.dns import make_dns_tool, parse_servers
+from .adapters.opnsense import OpnsenseClient, make_opnsense_tools
+from .adapters.pbs import PbsClient, make_pbs_tools
+from .adapters.proxmox import ProxmoxClient, make_proxmox_tools
+from .adapters.switch import SwitchSession, make_switch_tool
+from .audit import AuditLog
+from .config import Settings
+from .llm import OllamaBackend
+from .router import Router
+from .tools import Tool, ToolRegistry, make_local_status
+from .vault import ERROR, LOCKED, NONE, UNLOCKED, Vault
+
+# The lab's systems: name, tool name prefix, the vault values it needs, and the certificate it trusts (in the trust
+# folder; None for a system reached without one). A system with none of its values in the vault is not set up, and
+# is left out without a word; one with some of them says which are missing.
+SYSTEMS = (
+    ("proxmox", "proxmox_", ("JARVIS_PVE_TOKEN_ID", "JARVIS_PVE_TOKEN_SECRET", "JARVIS_PVE_HOSTS"), "proxmox-ca.pem"),
+    ("pbs", "pbs_", ("JARVIS_PBS_TOKEN_ID", "JARVIS_PBS_TOKEN_SECRET", "JARVIS_PBS_HOSTS"), "pbs.pem"),
+    ("opnsense", "opnsense_", ("JARVIS_OPNSENSE_API_KEY", "JARVIS_OPNSENSE_API_SECRET", "JARVIS_OPNSENSE_HOSTS"), "opnsense.pem"),
+    ("dns", "dns_", ("JARVIS_DNS_SERVERS", "JARVIS_DNS_LAB_NAME"), None),
+    ("switch", "switch_", ("JARVIS_SWITCH_USER", "JARVIS_SWITCH_PASSWORD", "JARVIS_SWITCH_HOST"), "switch_known_hosts"),
+)
+# Where each certificate comes from, for the sentence that says it is missing.
+TRUST_FROM = {
+    "proxmox-ca.pem": "the installer on the Proxmox node puts it there",
+    "pbs.pem": "the backup server's own certificate; copy it there",
+    "opnsense.pem": "the firewall's own web certificate; copy it there",
+    "switch_known_hosts": "the switch's SSH host key, as ssh-keyscan prints it; check it and put it there",
+}
+
+
+class Jarvis:
+    """Everything one conversation needs, put together from the settings."""
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None, surface: str = SURFACE,
+                 record_vault: bool = False):
+        self.settings = settings
+        self.record_vault = record_vault   # the service records each change of the vault; a command run once does not
+        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(10, read=None))
+        self.audit = AuditLog(settings.audit_path)
+        self.vault = Vault(settings.env_dir, settings.secrets_mode, settings.identity, settings.sops,
+                           watch=tuple(settings.trust_dir / trust for *_, trust in SYSTEMS if trust))
+        # Nothing a tool returns may carry a value of the vault on to the model.
+        self.tools = ToolRegistry(self.audit, redact=lambda text: self.vault.mask(text))
+        self.tools.register(make_local_status(settings.ollama_url, self.client))
+        self.lab: dict[str, str] = {}    # system: why it has no tools ("" when it has them)
+        self._lab_http: list[httpx.AsyncClient] = []
+        self._closing: list[httpx.AsyncClient] = []
+        self.backend = OllamaBackend(settings.ollama_url, settings.model, self.client) if settings.has_model else None
+        self.router = Router(
+            [self.backend] if self.backend else [], self.tools, self.audit, audit_text=settings.audit_text,
+            describe=lambda names, model: describe(names, model, where=settings.where, surface=surface, lab=self.lab_note()),
+        )
+        try:
+            self.refresh()
+        except Exception as exc:  # whatever the vault holds, Jarvis starts; it says why it cannot read the lab
+            self.vault.status, self.vault.detail = "error", f"the vault could not be read ({type(exc).__name__})"
+            self.lab = {name: "the vault cannot be read" for name, *_ in SYSTEMS}
+
+    # ------------------------------------------------------------------ the vault and the lab's tools
+
+    def refresh(self) -> bool:
+        """Reads the vault again if it changed, and gives the lab's tools to Jarvis or takes them away to match.
+        True when something changed. Cheap when nothing did: it looks at file times only."""
+        if not self.vault.refresh():
+            return False
+        self.apply_vault()
+        return True
+
+    def apply_vault(self) -> None:
+        """Gives the lab's tools to Jarvis or takes them away, to match what the vault now holds. The clients of
+        the tools taken away are closed."""
+        for _, prefix, _, _ in SYSTEMS:
+            self.tools.remove(prefix)
+        retired, self._lab_http = self._lab_http, []
+        for http in retired:
+            self._retire(http)
+        lab: dict[str, str] = {}
+        for system in SYSTEMS:
+            why = self._system(*system)
+            if why is not None:
+                lab[system[0]] = why
+        self.lab = lab
+        record: dict[str, Any] = {"status": self.vault.status, "files": self.vault.files, "values": len(self.vault.names()),
+                                  "tools": [name for name in self.tools.names() if name != "local_status"]}
+        if self.vault.status != UNLOCKED:
+            record["detail"] = self.vault.detail
+        if self.record_vault:
+            self.audit.append("vault", record)
+
+    def _system(self, name: str, prefix: str, needs: tuple[str, ...], trust: str | None) -> str | None:
+        """Gives Jarvis one system's tools when it can. "" when it did, why not when it did not, None when the
+        vault does not mention the system at all."""
+        if self.vault.status != UNLOCKED:
+            return "the vault is locked" if self.vault.status == LOCKED else "the vault cannot be read"
+        missing = [need for need in needs if not self.vault.get(need)]
+        if len(missing) == len(needs):
+            return None
+        if missing:
+            return "not in the vault: " + ", ".join(missing)
+        cert = self.settings.trust_dir / trust if trust else None
+        if cert is not None and not cert.is_file():
+            return f"{cert} is missing ({TRUST_FROM[trust]})"
+        value = self.vault.get
+        hosts = [item.strip() for item in (value(needs[2]) if len(needs) > 2 else "").split(",") if item.strip()]
+        try:
+            if name == "proxmox":
+                client = ProxmoxClient(hosts, value(needs[0]), value(needs[1]), cert)
+                tools = make_proxmox_tools(client)
+            elif name == "pbs":
+                client = PbsClient(hosts, value(needs[0]), value(needs[1]), cert)
+                tools = make_pbs_tools(client)
+            elif name == "opnsense":
+                client = OpnsenseClient(hosts, value(needs[0]), value(needs[1]), cert)
+                tools = make_opnsense_tools(client)
+            elif name == "switch":
+                client = None
+                if len(hosts) != 1:
+                    raise ValueError("one switch address")
+                tools = [make_switch_tool(SwitchSession(hosts[0], value(needs[0]), value(needs[1]), cert))]
+            else:
+                client = None
+                tools = [make_dns_tool(parse_servers(value(needs[0])), value(needs[1]).strip())]
+        except (ValueError, OSError) as exc:
+            return f"cannot be set up: {type(exc).__name__}"
+        if client is not None:
+            self._lab_http.append(client._http)
+        for tool in tools:
+            self.tools.register(tool)
+        return ""
+
+    def _retire(self, http: httpx.AsyncClient) -> None:
+        try:
+            asyncio.get_running_loop().create_task(http.aclose())
+        except RuntimeError:  # no loop running (a command that ends anyway): closed at the end
+            self._closing.append(http)
+
+    def lab_note(self) -> str:
+        """For the model: why it cannot read the lab, in one sentence, when it cannot."""
+        if self.vault.status == LOCKED:
+            return ("Your tools for the lab's systems are switched off because your vault is locked since your last "
+                    "restart. The owner unlocks it on the brain by running jarvis-unlock as root; until then say so when "
+                    "asked about the lab.")
+        if self.vault.status in (ERROR, NONE) and self.settings.secrets_mode == "sops":
+            return ("Your tools for the lab's systems are switched off because your vault cannot be read: "
+                    f"{self.vault.detail}.")
+        return ""
+
+    def lab_tools(self) -> list[Tool]:
+        return [tool for tool in self.tools._tools.values() if tool.name != "local_status"]
+
+    async def close(self) -> None:
+        for http in self._lab_http + self._closing:
+            await http.aclose()
+        await self.client.aclose()

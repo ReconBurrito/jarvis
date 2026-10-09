@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# jarvis-unlock: opens Jarvis's vault after a restart. Run as root in the brain container, on a terminal
+# (pct enter, then type it).
+#
+#   jarvis-unlock --setup     once: make this brain's age identity, seal it with a passphrase you choose, unlock,
+#                             and print its public key for .sops.yaml
+#   jarvis-unlock             after every restart: asks for the passphrase and unlocks
+#   jarvis-unlock --lock      locks again now
+#   jarvis-unlock --status    says whether the vault is locked, and whether its files are encrypted for this brain
+#
+# The identity rests on the disk only sealed with the passphrase (age's own passphrase encryption, scrypt), in a
+# folder only root can read. Unlocked, it is in /run, which is memory-backed and emptied by a restart; Jarvis
+# reads it there and notices within seconds. Nothing here is ever printed but the public key.
+set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export LC_ALL=C
+umask 077
+cd /
+
+JARVIS_ETC="${JARVIS_ETC:-/etc/jarvis}"
+KEYS="${JARVIS_KEY_DIR:-/var/lib/jarvis-key}"     # the sealed identity and its public key; root only
+SEALED="$KEYS/identity.age"
+RECIPIENT="$KEYS/recipient"
+RUN="${JARVIS_RUN_DIR:-/run/jarvis}"              # memory-backed; root, group jarvis
+IDENTITY="$RUN/age.key"
+
+die() { printf 'jarvis-unlock: %s\n' "$*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run this as root in the brain container (pct enter, then jarvis-unlock)."
+site_get() { sed -n "s/^$1=//p" "$JARVIS_ETC/site.env" 2>/dev/null | tail -n 1; }
+ENV_DIR="$(site_get JARVIS_ENV_DIR)"
+ENV_DIR="${ENV_DIR:-/etc/jarvis/secrets}"
+[ "$(site_get JARVIS_SECRETS_MODE)" = "sops" ] \
+    || die "this brain keeps its secrets as plain files (JARVIS_SECRETS_MODE in $JARVIS_ETC/site.env), so there is nothing to unlock."
+for tool in age age-keygen script; do
+    command -v "$tool" >/dev/null || die "$tool is not installed. As root, run: update --repair"
+done
+
+identity_ok() {  # one age identity, and nothing else
+    [ "$(grep -c . <<<"$1")" = "1" ] && [[ "$1" =~ ^AGE-SECRET-KEY-1[0-9A-Z]{58}$ ]]
+}
+
+public_of() { age-keygen -y <(printf '%s\n' "$1") 2>/dev/null; }
+
+MIN_PASSPHRASE=8
+WORK=""
+trap '[ -z "$WORK" ] || rm -rf "$WORK"' EXIT
+
+# The passphrase is asked here, not by age: age takes an empty answer as "make one up for me", prints it once on
+# the terminal and seals with it, and a passphrase nobody chose is lost on the next restart. Here an empty or short
+# one is refused, and age is handed what was typed through a terminal of its own whose screen nobody sees.
+need_terminal() {
+    { : </dev/tty; } 2>/dev/null \
+        || die "the passphrase is asked on a terminal, and there is none here. On the node, run: pct enter (the brain's ID), then jarvis-unlock${1:+ $1}"
+}
+
+ask() {  # ask PROMPT: reads one line from the terminal without showing it
+    local answer=""
+    IFS= read -rs -p "$1" answer </dev/tty || { echo >&2; die "nothing was typed. Nothing was changed."; }
+    echo >&2
+    printf '%s' "$answer"
+}
+
+# A private folder in /run (memory-backed) for the identity while age works on it. Removed on the way out.
+workspace() {
+    getent group jarvis >/dev/null || die "the jarvis group is missing. As root, run: update --repair"
+    install -d -m 0750 -o root -g jarvis "$RUN"
+    WORK="$(mktemp -d "$RUN/.unlock.XXXXXX")"
+}
+
+# age_with PASSPHRASE COMMAND...: runs age on a terminal of its own and types the passphrase there (twice when
+# sealing, since age asks to confirm). Nothing age shows, the passphrase's echo included, is kept.
+age_with() {
+    local passphrase="$1" times="$2" line command
+    shift 2
+    command="$(printf '%q ' "$@")"
+    for ((line = 0; line < times; line++)); do printf '%s\n' "$passphrase"; done \
+        | script -qec "$command" /dev/null >/dev/null 2>&1
+}
+
+# Puts the identity where Jarvis reads it: written beside its place and renamed, readable by the group jarvis.
+place() {
+    local identity="$1" tmp
+    getent group jarvis >/dev/null || die "the jarvis group is missing. As root, run: update --repair"
+    install -d -m 0750 -o root -g jarvis "$RUN"
+    tmp="$(mktemp "$RUN/.age.key.XXXXXX")"
+    printf '%s\n' "$identity" > "$tmp"
+    chgrp jarvis "$tmp"
+    chmod 0440 "$tmp"
+    mv -f "$tmp" "$IDENTITY"
+    install -m 0644 -o root -g root "$RECIPIENT" "$RUN/recipient"
+}
+
+# Which vault files are encrypted for this brain. sops writes each file's recipients into it in clear.
+about_files() {
+    local public="$1" file found=0
+    for file in "$ENV_DIR"/*.enc.env; do
+        [ -f "$file" ] || continue
+        found=1
+        if grep -qE "^sops_age__list_[0-9]+__map_recipient=${public}\$" "$file"; then
+            printf '   %s: encrypted for this brain\n' "$(basename "$file")"
+        else
+            printf '   %s: NOT encrypted for this brain: add the public key to .sops.yaml and run sops updatekeys on it\n' "$(basename "$file")"
+        fi
+    done
+    [ "$found" = "1" ] || printf '   no vault file in %s yet: copy lab.enc.env there (owner root, group jarvis, mode 0640)\n' "$ENV_DIR"
+}
+
+case "${1:-}" in
+    --setup)
+        if [ -e "$SEALED" ] && [ "${2:-}" != "--force" ]; then
+            die "this brain has an identity already ($SEALED). Nothing was changed. To make a new one (the vault must then be encrypted for it again): jarvis-unlock --setup --force"
+        fi
+        install -d -m 0700 -o root -g root "$KEYS"
+        identity="$(age-keygen 2>/dev/null | grep -E '^AGE-SECRET-KEY-1')"
+        identity_ok "$identity" || die "age-keygen did not make an identity. Nothing was changed."
+        public="$(public_of "$identity")"
+        [[ "$public" =~ ^age1[0-9a-z]{58}$ ]] || die "the identity's public key could not be worked out. Nothing was changed."
+        need_terminal --setup
+        workspace
+        echo "Choose a passphrase for Jarvis's vault, at least $MIN_PASSPHRASE characters. You type it after every restart of the brain; it is not stored anywhere and is not shown as you type."
+        for _ in 1 2 3; do
+            passphrase="$(ask "Passphrase: ")"
+            if [ -z "$passphrase" ]; then
+                echo "An empty passphrase is not accepted. Try again."
+            elif [ "${#passphrase}" -lt "$MIN_PASSPHRASE" ]; then
+                echo "That is shorter than $MIN_PASSPHRASE characters. Try again."
+            elif [ "$(ask "The same passphrase again: ")" != "$passphrase" ]; then
+                echo "The two did not match. Try again."
+            else
+                break
+            fi
+            passphrase=""
+        done
+        [ -n "$passphrase" ] || die "no passphrase was chosen. Nothing was changed."
+        printf '%s\n' "$identity" > "$WORK/identity"
+        age_with "$passphrase" 2 age -p -o "$SEALED.new" "$WORK/identity" \
+            || { rm -f "$SEALED.new"; die "age did not seal the identity. Nothing was changed."; }
+        rm -f "$WORK/identity"
+        # Proved before it replaces anything: the sealed file opens with the passphrase to this same identity.
+        age_with "$passphrase" 1 age -d -o "$WORK/proof" "$SEALED.new" && [ "$(cat "$WORK/proof" 2>/dev/null)" = "$identity" ] \
+            || { rm -f "$SEALED.new"; die "the sealed identity did not open again with that passphrase. Nothing was changed."; }
+        unset passphrase
+        chmod 0600 "$SEALED.new"
+        mv -f "$SEALED.new" "$SEALED"
+        printf '%s\n' "$public" > "$RECIPIENT.new"
+        chmod 0644 "$RECIPIENT.new"
+        mv -f "$RECIPIENT.new" "$RECIPIENT"
+        place "$identity"
+        unset identity
+        echo
+        echo "Jarvis's vault identity is made and unlocked. Its public key (not a secret):"
+        echo "$public"
+        echo
+        about_files "$public"
+        ;;
+    "")
+        [ -s "$SEALED" ] || die "this brain has no identity yet. Run: jarvis-unlock --setup"
+        [ -s "$RECIPIENT" ] || die "the record of this brain's public key ($RECIPIENT) is missing. Nothing was changed. To start over: jarvis-unlock --setup --force"
+        public="$(cat "$RECIPIENT")"
+        need_terminal
+        workspace
+        passphrase="$(ask "Passphrase for Jarvis's vault: ")"
+        [ -n "$passphrase" ] || die "no passphrase was typed. Nothing was changed."
+        age_with "$passphrase" 1 age -d -o "$WORK/identity" "$SEALED" \
+            || die "that passphrase does not open this brain's sealed identity. Nothing was changed."
+        unset passphrase
+        identity="$(cat "$WORK/identity")"
+        rm -f "$WORK/identity"
+        identity_ok "$identity" || die "what the sealed file holds is not an age identity. Nothing was changed."
+        [ "$(public_of "$identity")" = "$public" ] || die "the sealed identity does not match its public key in $RECIPIENT. Nothing was changed."
+        place "$identity"
+        unset identity
+        echo "Unlocked. Jarvis reads its vault within a few seconds."
+        about_files "$public"
+        ;;
+    --lock)
+        rm -f "$IDENTITY"
+        echo "Locked. Jarvis gives up its tools for the lab within a few seconds."
+        ;;
+    --status)
+        if [ ! -s "$SEALED" ]; then
+            echo "No identity yet. Run: jarvis-unlock --setup"
+        elif [ -s "$IDENTITY" ]; then
+            echo "Unlocked. Public key: $(cat "$RECIPIENT")"
+        else
+            echo "Locked. Public key: $(cat "$RECIPIENT")"
+        fi
+        [ ! -s "$RECIPIENT" ] || about_files "$(cat "$RECIPIENT")"
+        ;;
+    *) die "unknown option '$1'. Use no option, --setup, --lock or --status." ;;
+esac

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# update: moves this Jarvis container to the newest release. Run as root inside the container
+# (pct enter, then type: update).
+#
+#   update              fetch, check the release, install it and check the result; go back if that check fails
+#   update --check      only say whether a newer release exists
+#   update --repair     put the installed release back as it was installed and run its install steps again
+#   ... --discard       with update or --repair: also when the code in /opt/jarvis was changed by hand;
+#                       those changes are taken out of the way (into a git stash there)
+#
+# With JARVIS_RELEASE_CHANNEL=signed (the default) only a release tag signed by a key pinned in
+# /etc/jarvis/allowed_signers is installed, and never an older one than this container has run.
+# misc/release.func has the exact rules.
+set -euo pipefail
+
+# Everything is inside main, so the whole file is read before any of it runs: this command replaces
+# itself during an update.
+main() {
+    JARVIS_CHECKOUT="${JARVIS_CHECKOUT:-/opt/jarvis}"
+    [ -r "$JARVIS_CHECKOUT/misc/install.func" ] || { echo "update: Jarvis is not installed in $JARVIS_CHECKOUT." >&2; exit 1; }
+    # shellcheck source=misc/install.func
+    . "$JARVIS_CHECKOUT/misc/install.func"
+    # shellcheck source=misc/release.func
+    . "$JARVIS_CHECKOUT/misc/release.func"
+    need_root
+
+    local mode="" discard=0 option script was_name was_commit state
+    for option in "$@"; do
+        case "$option" in
+            --check|--repair) [ -z "$mode" ] || die "use one of --check and --repair, not both."; mode="$option" ;;
+            --discard) discard=1 ;;
+            *) die "unknown option '$option'. Use no option, --check, --repair, and --discard with either of the last two." ;;
+        esac
+    done
+    exec 9>/run/jarvis-update.lock
+    flock -n 9 || die "another update is running."
+
+    script="install/$(script_for_role "$(site_get JARVIS_ROLE)")"
+    JARVIS_RELEASE_CHANNEL="$(site_get JARVIS_RELEASE_CHANNEL)"
+    JARVIS_RELEASE_BRANCH="$(site_get JARVIS_RELEASE_BRANCH)"
+    export JARVIS_RELEASE_CHANNEL JARVIS_RELEASE_BRANCH
+    release_check_record
+    was_name="$(release_installed name)"
+    was_commit="$(release_installed commit)"
+    state="$(release_state)"
+    local by_hand="the code in $JARVIS_CHECKOUT is not the installed release as it was installed: it was changed by hand. See: git -C $JARVIS_CHECKOUT status"
+
+    if [ "$mode" = "--repair" ]; then
+        [ -n "$was_commit" ] || die "no release is recorded as installed here; run update to install one."
+        [ "$state" != "changed" ] || [ "$discard" = "1" ] \
+            || die "$by_hand. Nothing was repaired. To put those changes aside and repair: update --repair --discard"
+        guard
+        release_install "$was_name" "$was_commit" "$script" \
+            || die "repairing $was_name failed. See the messages above; update --repair tries again."
+        say "Jarvis $was_name: repaired"
+        return 0
+    fi
+
+    if [ "$state" = "changed" ] && [ "$discard" = "0" ] && [ "$mode" != "--check" ]; then
+        die "$by_hand. Nothing was updated. To put those changes aside and update: update --discard"
+    fi
+    release_fetch
+    release_resolve
+    release_check_floor
+    if [ "$mode" = "--check" ]; then
+        if [ "$RELEASE_COMMIT" != "$was_commit" ]; then
+            echo "Release $RELEASE_NAME is available (installed: ${was_name:-nothing})."
+        elif [ "$state" = "clean" ]; then
+            echo "Jarvis is up to date at $was_name."
+        fi
+        case "$state" in
+            pending) echo "An earlier update or repair was cut short. Run update to put Jarvis in order." ;;
+            changed) echo "The code in $JARVIS_CHECKOUT was changed by hand; update refuses until it is told to put that aside (update --discard)." ;;
+        esac
+        return 0
+    fi
+    if [ "$RELEASE_COMMIT" = "$was_commit" ] && [ "$state" = "clean" ]; then
+        echo "Jarvis is up to date at $was_name."
+        return 0
+    fi
+
+    if [ "$RELEASE_COMMIT" = "$was_commit" ]; then
+        say "Putting Jarvis $was_name back in order"
+    else
+        say "Updating Jarvis from ${was_name:-nothing} to $RELEASE_NAME"
+    fi
+    guard
+    if release_install "$RELEASE_NAME" "$RELEASE_COMMIT" "$script"; then
+        say "Jarvis is now at $RELEASE_NAME"
+        return 0
+    fi
+    if [ -z "$was_commit" ] || [ "$RELEASE_COMMIT" = "$was_commit" ]; then
+        die "installing $RELEASE_NAME failed, and no other release is installed here to go back to. See the messages above; update tries again."
+    fi
+    warn "release $RELEASE_NAME did not install cleanly; going back to $was_name"
+    if release_install "$was_name" "$was_commit" "$script"; then
+        die "the update failed. Jarvis is back at $was_name and passes its check."
+    fi
+    die "the update failed, and going back to $was_name did not pass its check either. See the messages above; update --repair tries again."
+}
+
+# While code is being replaced, a Ctrl-C, a hang-up or a closed pipe must not end this command halfway: the
+# install step it interrupts fails, and what follows goes back to the release that was installed. Before
+# that point (fetching, checking signatures) the same keys end the command as usual.
+guard() {
+    trap ':' INT TERM HUP
+    trap '' PIPE
+}
+
+main "$@"

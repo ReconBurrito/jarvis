@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Jarvis</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="icon.png">
+<!-- Where Jarvis's panel starts. The panel itself is served by the brain; this page is opened from disk,
+     looks for the brain (brain.js, written at install, says where it is) and goes there as soon as the
+     brain answers. Until then, and on a desktop without a brain, it shows the clock and says how things
+     stand. The dial is redrawn once a second and not more often, because every change on this desktop
+     is sent to the viewer as video. -->
+<style>
+  @font-face { font-family: "Oxanium"; src: url("Oxanium.ttf"); font-weight: 200 800; }
+  :root {
+    color-scheme: dark;
+    --deep: #04101a;   /* the night behind everything */
+    --well: #081b29;   /* a surface lying on it */
+    --line: #1a4459;   /* rules and resting marks */
+    --glow: #5fd6ff;   /* what is lit */
+    --ice: #d6f2ff;    /* what is read */
+    --mute: #7ba6ba;   /* what is read second */
+    --amber: #ffb454;  /* what wants attention */
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(120% 46% at 50% 0%, #0b2a3d 0%, rgba(11, 42, 61, 0) 70%),
+      var(--deep);
+    color: var(--ice);
+    font: 400 15px/1.5 "Oxanium", "DejaVu Sans", sans-serif;
+    display: grid; grid-template-rows: auto auto auto 1fr auto;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .name { padding: 18px 22px 0; display: flex; justify-content: space-between; align-items: baseline; }
+  .name b { font-weight: 600; font-size: 17px; letter-spacing: .34em; color: var(--glow); }
+  .name span { font-size: 12.5px; color: var(--mute); }
+
+  /* The dial gives way to the text below it on a low screen; its figures follow its size. */
+  .dial { position: relative; width: min(100%, 340px, 38vh); margin: 4px auto 0; aspect-ratio: 1; container-type: inline-size; }
+  .dial svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .dial circle, .dial path, .dial line { fill: none; stroke-linecap: butt; }
+  .rest { stroke: var(--line); }
+  .lit { stroke: var(--glow); }
+  .tick { stroke: var(--line); stroke-width: 2; }
+  .tick.now { stroke: var(--glow); stroke-width: 3; }
+  .tick.near { stroke: #2f89ab; }
+  #minutes { stroke: var(--glow); stroke-width: 5; filter: drop-shadow(0 0 5px rgba(95, 214, 255, .55)); }
+  #hours { stroke: var(--ice); stroke-width: 2; opacity: .8; }
+  .face { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+  .face time { font-weight: 300; font-size: 16cqw; line-height: 1; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+  .face time small { font-size: 6cqw; color: var(--mute); margin-left: 1.2cqw; }
+  .face div { margin-top: 2.4cqw; font-size: max(11px, 4.1cqw); color: var(--mute); }
+
+  .state { margin: 2px 22px 18px; padding: 10px 14px; background: var(--well); border-left: 2px solid var(--amber); font-size: 14.5px; }
+  .state i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); margin-right: 9px; vertical-align: 1px; }
+
+  main { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; padding: 0 22px; }
+  section { padding: 14px 0 15px; border-top: 1px solid var(--line); }
+  h2 { margin: 0 0 5px; font-size: 14px; font-weight: 600; letter-spacing: .04em; color: var(--glow); }
+  p { margin: 0; max-width: 36ch; font-size: 14.5px; color: var(--mute); }
+  code { font-family: inherit; color: var(--ice); border-bottom: 1px solid var(--line); }
+
+  footer { padding: 11px 22px 13px; border-top: 1px solid var(--line); font-size: 12.5px; color: #4f7486; display: flex; justify-content: space-between; }
+
+  /* The dial draws itself once when the panel opens; after that it only ticks. */
+  @media (prefers-reduced-motion: no-preference) {
+    .dial svg { animation: open 1.1s cubic-bezier(.2, .7, .2, 1) both; }
+    @keyframes open { from { opacity: 0; transform: rotate(-24deg) scale(.94); } to { opacity: 1; transform: none; } }
+  }
+</style>
+
+<div class="name"><b>JARVIS</b><span id="day"></span></div>
+
+<div class="dial" role="img" aria-label="Clock">
+  <svg viewBox="0 0 320 320">
+    <g id="ticks"></g>
+    <!-- resting rings: a broken outer band and the two tracks the hands run on -->
+    <circle class="rest" cx="160" cy="160" r="130" stroke-width="1" stroke-dasharray="118 18 46 18 190 18 80 18 220 91"/>
+    <circle class="rest" cx="160" cy="160" r="116" stroke-width="5" opacity=".55"/>
+    <circle class="rest" cx="160" cy="160" r="103" stroke-width="2" opacity=".55"/>
+    <circle id="minutes" cx="160" cy="160" r="116" transform="rotate(-90 160 160)"/>
+    <circle id="hours" cx="160" cy="160" r="103" transform="rotate(-90 160 160)"/>
+    <path class="lit" stroke-width="1" opacity=".5" d="M160 66v10M160 244v10M66 160h10M244 160h10"/>
+  </svg>
+  <div class="face">
+    <time id="clock">--:--</time>
+    <div id="date"></div>
+  </div>
+</div>
+
+<div class="state"><i></i><span id="state">Desktop ready. No brain is linked to this desktop yet.</span></div>
+
+<main>
+  <section>
+    <h2>Conversation</h2>
+    <p>What you say to Jarvis and what it answers will appear here.</p>
+  </section>
+  <section>
+    <h2>Waiting for you</h2>
+    <p>Changes Jarvis wants to make to your lab will wait here for your yes or no.</p>
+  </section>
+  <section>
+    <h2>Lab pulse</h2>
+    <p>No readings yet. They come from the brain: on the Proxmox node, run the desktop's installer with <code>var_brain</code>.</p>
+  </section>
+</main>
+
+<footer><span>Jarvis desktop</span><span id="zone"></span></footer>
+
+<script src="brain.js"></script>
+<script>
+  "use strict";
+  const ticks = document.getElementById("ticks");
+  for (let n = 0; n < 60; n++) {
+    const long = n % 5 === 0;
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", 160); line.setAttribute("x2", 160);
+    line.setAttribute("y1", long ? 8 : 12); line.setAttribute("y2", 20);
+    line.setAttribute("transform", "rotate(" + n * 6 + " 160 160)");
+    line.setAttribute("class", "tick");
+    ticks.appendChild(line);
+  }
+  const arc = (id, radius, part) => {
+    const round = 2 * Math.PI * radius;
+    document.getElementById(id).setAttribute("stroke-dasharray", (round * part).toFixed(1) + " " + round.toFixed(1));
+  };
+  const two = (n) => String(n).padStart(2, "0");
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                  "October", "November", "December"];
+  function draw() {
+    const now = new Date();
+    const s = now.getSeconds(), m = now.getMinutes(), h = now.getHours();
+    document.getElementById("clock").innerHTML = two(h) + ":" + two(m) + "<small>" + two(s) + "</small>";
+    document.getElementById("date").textContent = now.getDate() + " " + months[now.getMonth()] + " " + now.getFullYear();
+    document.getElementById("day").textContent = days[now.getDay()];
+    Array.from(ticks.children).forEach((tick, n) => {
+      const behind = (s - n + 60) % 60;
+      tick.setAttribute("class", "tick" + (behind === 0 ? " now" : behind <= 3 ? " near" : ""));
+    });
+    arc("minutes", 116, (m + s / 60) / 60);
+    arc("hours", 103, ((h % 12) + m / 60) / 12);
+    setTimeout(draw, 1000 - now.getMilliseconds() + 5);
+  }
+  try { document.getElementById("zone").textContent = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* no zone name */ }
+  draw();
+
+  // The brain: asked whether it is there (the answer itself cannot be read from here, only that one came),
+  // and gone to when it is.
+  const brain = String(window.JARVIS_BRAIN || "");
+  const state = document.getElementById("state");
+  function knock() {
+    const stop = new AbortController();
+    const patience = setTimeout(() => stop.abort(), 4000);
+    fetch(brain + "/panel/ping", {mode: "no-cors", cache: "no-store", signal: stop.signal})
+      .then(() => { location.replace(brain + "/panel/"); })
+      .catch(() => {
+        state.textContent = "The brain at " + new URL(brain).host + " does not answer. Trying again.";
+        setTimeout(knock, 5000);
+      })
+      .finally(() => clearTimeout(patience));
+  }
+  if (brain) {
+    state.textContent = "Reaching the brain.";
+    knock();
+  }
+</script>
+</html>

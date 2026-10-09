@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# jarvis: talk to Jarvis in this terminal, or check that it is in working order.
+#
+#   jarvis                    a conversation
+#   jarvis chat "question"    one question, one answer
+#   jarvis doctor             is everything in working order? (asks the model one question)
+#   jarvis audit              was anything in the audit log changed or removed?
+#   jarvis --help
+#
+# Jarvis never runs as root. Started by root, it is handed to the user jarvis here, in a session of its own:
+# it reads and writes this terminal but the terminal is not its own, so nothing that runs as jarvis can type
+# into root's shell. Ctrl-C therefore arrives at this script, which passes it on.
+set -euo pipefail
+python=/opt/jarvis-venv/current/bin/python
+[ -x "$python" ] || { echo "jarvis: Jarvis's Python environment is not there ($python). As root, run: update --repair" >&2; exit 1; }
+[ -f /opt/jarvis/src/jarvis/__main__.py ] || { echo "jarvis: the release installed here has no jarvis command. As root, run: update" >&2; exit 1; }
+cd /
+if [ "$(id -u)" -ne 0 ]; then
+    [ "$(id -un)" = "jarvis" ] || { echo "jarvis: run this as root or as the user jarvis." >&2; exit 1; }
+    exec "$python" -I -m jarvis "$@"
+fi
+setsid runuser -u jarvis -- "$python" -I -m jarvis "$@" <&0 &
+child=$!
+trap 'kill -INT -- "-$child" 2>/dev/null || true' INT
+trap 'kill -TERM -- "-$child" 2>/dev/null || true' TERM HUP
+status=0
+# A wait that a signal cuts short returns early; the loop goes on until Jarvis itself has ended.
+while kill -0 "$child" 2>/dev/null; do
+    if wait "$child"; then status=0; else status=$?; fi
+done
+exit "$status"

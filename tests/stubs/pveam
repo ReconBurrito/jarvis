@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'pveam %s\n' "$*" >> "$STUB_STATE/calls"
+case "$1" in
+    list)
+        echo "NAME                                                         SIZE"
+        [ -f "$STUB_STATE/no-template" ] || echo "$2:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst      135.03MB"
+        ;;
+    update) ;;
+    # no-template: none on the node; no-template-offered: none to download either.
+    available) [ -f "$STUB_STATE/no-template-offered" ] || echo "system          ubuntu-24.04-standard_24.04-2_amd64.tar.zst" ;;
+    download) ;;
+    *) exit 64 ;;
+esac

@@ -1,0 +1,9 @@
+# Keys allowed to sign Jarvis releases, in OpenSSH allowed_signers format:
+#
+#   principal namespaces="git" key-type key
+#
+# The installer copies this file to /etc/jarvis/allowed_signers when a container is created (and again
+# only if that copy holds no key at all). `update` checks every release tag against that copy and never
+# replaces it from the repository, so a change here cannot make an installed container trust a new key.
+jarvis-release namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJjq2vZL5/EGXqxmoPBYeNDKaakoA+i9eqtu0MI8Zml0
+jarvis-release-2 namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPNZHnLgBtofIi5eRF2tzm3jSgJ2SVbxrtBSgpTNIAm4

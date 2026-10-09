@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'pvesh %s\n' "$*" >> "$STUB_STATE/calls"
+case "$*" in
+    "get /cluster/nextid") echo "${STUB_NEXTID:-100}" ;;
+    "get /cluster/resources"*) cat "$STUB_STATE/resources" 2>/dev/null || echo "[]" ;;
+    *) exit 64 ;;
+esac

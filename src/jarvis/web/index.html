@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Jarvis</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="panel.css">
+<!-- Jarvis's panel, served by Jarvis itself. Everything it loads comes from the same place: this page, its
+     style sheet, its script, one font and one picture. It is redrawn only when something changes (the clock
+     once a second), because every change on the desktop is sent to the viewer as video. -->
+
+<header class="name"><b>JARVIS</b><span id="day"></span></header>
+
+<div class="top">
+  <div class="dial" id="dial" role="img" aria-label="Clock">
+    <svg viewBox="0 0 320 320" aria-hidden="true">
+      <g id="ticks"></g>
+      <circle class="rest" cx="160" cy="160" r="130" stroke-width="1" stroke-dasharray="118 18 46 18 190 18 80 18 220 91"/>
+      <circle class="rest" cx="160" cy="160" r="116" stroke-width="5" opacity=".55"/>
+      <circle class="rest" cx="160" cy="160" r="103" stroke-width="2" opacity=".55"/>
+      <circle id="minutes" cx="160" cy="160" r="116" transform="rotate(-90 160 160)"/>
+      <circle id="hours" cx="160" cy="160" r="103" transform="rotate(-90 160 160)"/>
+      <path class="lit" stroke-width="1" opacity=".5" d="M160 66v10M160 244v10M66 160h10M244 160h10"/>
+    </svg>
+    <div class="face">
+      <time id="clock">--:--</time>
+      <div id="date"></div>
+    </div>
+  </div>
+
+  <section class="pulse" aria-labelledby="pulse-title">
+    <h2 id="pulse-title">Lab pulse</h2>
+    <dl>
+      <div><dt>Up</dt><dd id="up">--</dd></div>
+      <div><dt>Load</dt><dd id="load">--</dd></div>
+      <div><dt>Model</dt><dd id="model">--</dd></div>
+      <div><dt>Cluster</dt><dd id="cluster">--</dd></div>
+      <div><dt>Vault</dt><dd id="vault">--</dd></div>
+    </dl>
+    <p class="scope" id="scope">This machine only, so far.</p>
+  </section>
+</div>
+
+<div class="state" id="state" role="status"><i></i><span id="state-text">Connecting.</span></div>
+
+<section class="waiting" aria-labelledby="waiting-title">
+  <h2 id="waiting-title">Waiting for you</h2>
+  <p id="waiting">Nothing waits for your yes or no.</p>
+</section>
+
+<main id="log" aria-label="Conversation" aria-live="polite" tabindex="0">
+  <p class="empty" id="empty">Nothing said yet. Ask about the lab, or about anything else.</p>
+</main>
+
+<form id="ask" autocomplete="off">
+  <label class="hidden" for="text">Message to Jarvis</label>
+  <textarea id="text" rows="1" maxlength="4000" placeholder="Ask Jarvis" enterkeyhint="send"></textarea>
+  <button id="send" type="submit">Send</button>
+</form>
+
+<footer><button id="new" type="button">New conversation</button><span id="release"></span></footer>
+
+<script src="panel.js"></script>
+</html>

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Stand-in for curl. On the "node": the repository's download address answers with the test's own files.
+# In the "container": the desktop's own web server answers when the desktop runs, a pretend Ollama answers
+# once its service was started, and Jarvis's own service answers its health question once started.
+# A test steers the pretend Ollama with files in $STUB_STATE:
+#   no-ollama-download     its archive cannot be fetched
+#   ollama-down            it does not answer
+#   fail-model-pull        holds a model name that cannot be fetched
+#   model-wont-load        the model does not load
+#   ollama-gpu-share       how much of the loaded model is on the GPU, in percent (default 100)
+set -euo pipefail
+printf 'curl %s\n' "$*" >> "$STUB_STATE/calls"
+url="${*: -1}"
+out="" data=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -o) out="${args[i + 1]}" ;;
+        -d) data="${args[i + 1]}" ;;
+    esac
+done
+models="$STUB_STATE/ollama-models"
+named() { sed -n 's/.*"model": *"\([^"]*\)".*/\1/p' <<<"$data"; }      # the model a request names
+tagged() { case "$1" in *:*) printf '%s' "$1" ;; *) printf '%s:latest' "$1" ;; esac; }
+case "$url" in
+    https://github.com/getsops/sops/releases/download/*/sops-*.linux.amd64)
+        [ ! -f "$STUB_STATE/no-sops-download" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+        [ -n "$out" ] || exit 64
+        cp "$STUB_STATE/sops-download" "$out"
+        ;;
+    https://github.com/ollama/ollama/releases/download/*/ollama-linux-amd64.tar.zst)
+        [ ! -f "$STUB_STATE/no-ollama-download" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+        [ -n "$out" ] || exit 64
+        cp "$STUB_STATE/ollama.tar.zst" "$out"
+        ;;
+    http://127.0.0.1:11434/api/*)
+        if [ ! -f "$STUB_STATE/ollama-running" ] || [ -f "$STUB_STATE/ollama-down" ]; then
+            echo "curl: (7) Failed to connect to 127.0.0.1 port 11434" >&2
+            exit 7
+        fi
+        case "${url##*/api/}" in
+            version) printf '{"version":"9.9.9"}' ;;
+            tags)
+                printf '{"models":['
+                [ ! -s "$models" ] || sed 's/.*/{"name":"&"}/' "$models" | paste -sd, -
+                printf ']}'
+                ;;
+            pull)
+                if [ "$(cat "$STUB_STATE/fail-model-pull" 2>/dev/null)" = "$(named)" ]; then
+                    echo "curl: (22) The requested URL returned error: 500" >&2
+                    exit 22
+                fi
+                tagged "$(named)" >> "$models"
+                echo >> "$models"
+                printf '{"status":"success"}'
+                ;;
+            generate)
+                [ ! -f "$STUB_STATE/model-wont-load" ] || { echo "curl: (22) The requested URL returned error: 500" >&2; exit 22; }
+                tagged "$(named)" > "$STUB_STATE/ollama-loaded"
+                printf '{"response":"","done":true}'
+                ;;
+            ps)
+                share="$(cat "$STUB_STATE/ollama-gpu-share" 2>/dev/null || echo 100)"
+                if [ -s "$STUB_STATE/ollama-loaded" ]; then
+                    printf '{"models":[{"name":"%s","size":5000,"size_vram":%s}]}' "$(cat "$STUB_STATE/ollama-loaded")" "$((share * 50))"
+                else
+                    printf '{"models":[]}'
+                fi
+                ;;
+            *) exit 64 ;;
+        esac
+        ;;
+    https://codeload.github.com/test/jarvis/tar.gz/*)
+        [ ! -f "$STUB_STATE/no-download" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+        git -C "$STUB_SRC" archive --format=tar.gz --prefix="jarvis-${url##*/}/" "${url##*/}"
+        ;;
+    https://127.0.0.1:3001/api/)
+        # Through the desktop's web server to the control port behind it.
+        # no-backend: never. slow-backend holds a number: not for that many more askings (it starts last).
+        left="$(cat "$STUB_STATE/slow-backend" 2>/dev/null || echo 0)"
+        if [ -f "$STUB_STATE/no-backend" ]; then
+            printf '502'
+        elif [ "$left" -gt 0 ]; then
+            echo "$((left - 1))" > "$STUB_STATE/slow-backend"
+            printf '502'
+        else
+            printf '404'
+        fi
+        ;;
+    https://127.0.0.1:3001/)
+        if [ "$(cat "$STUB_STATE/docker-state" 2>/dev/null)" = "up" ] && [ ! -f "$STUB_STATE/no-answer" ]; then
+            printf '200'
+        else
+            printf '000'
+            exit 7
+        fi
+        ;;
+    https://*:8443/panel/ping)
+        # The brain, asked by the desktop's install script. brain-answer holds what it says (204, 403); without
+        # that file it is not there.
+        [[ " $* " == *" --cacert /etc/jarvis/brain-ca.pem "* ]] || { echo "curl stub: the brain was asked without its authority" >&2; exit 60; }
+        if [ -s "$STUB_STATE/brain-answer" ]; then
+            printf '%s' "$(cat "$STUB_STATE/brain-answer")"
+        else
+            printf '000'
+            exit 7
+        fi
+        ;;
+    https://*:8443/api/health)
+        # Jarvis's own service, asked by the brain's install script with the brain's own authority.
+        [[ " $* " == *" --cacert /etc/jarvis/tls/ca.pem "* ]] || { echo "curl stub: the service was asked without its authority" >&2; exit 60; }
+        if [ -f "$STUB_STATE/jarvis-running" ] && [ ! -f "$STUB_STATE/jarvis-silent" ]; then
+            printf '{"ok": true, "release": "test"}'
+        else
+            echo "curl: (7) Failed to connect" >&2
+            exit 7
+        fi
+        ;;
+    *) echo "curl stub: unexpected address $url" >&2; exit 64 ;;
+esac

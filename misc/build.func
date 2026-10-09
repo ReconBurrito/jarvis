@@ -1,0 +1,844 @@
+#!/usr/bin/env bash
+# Host-side functions for the Jarvis installers. Sourced by ct/*.sh on a Proxmox VE node, as root.
+#
+# The layout follows the Proxmox community helper scripts: a ct/ script on the host creates the container,
+# an install/ script runs inside it, settings are var_ names that can come from the environment or from an
+# answers file, and `update` inside the container moves it to the next release. Nothing here is sourced
+# from another project, and nothing is reported to anyone.
+#
+# Three ways to run:
+#   interactive, Default    a few questions, then a summary to confirm
+#   interactive, Advanced   every setting is asked
+#   unattended              JARVIS_ANSWERS=/path/to/file.vars: no question is asked at all
+#
+# A ct/ script sets ROLE (brain or desktop), JARVIS_SRC (this repository's files) and its role defaults in
+# ROLE_DEFAULTS before it calls build_main.
+
+shopt -s inherit_errexit
+export LC_ALL=C  # the patterns that check settings mean ASCII letters and digits, whatever the node's language
+
+KNOWN_KEYS=(ctid hostname container_storage template_storage disk cpu ram swap brg vlan mac net gateway
+    expect_ip gpu gpu_gid timezone tags onboot env_dir secrets model embed_model panel_allow desktop_allow
+    desktop_origin brain release branch repo allow_low_memory)
+declare -A S=() FROM_ENV=() GIVEN=()
+declare -A LABEL=(
+    [ctid]="Container ID"
+    [hostname]="Hostname"
+    [container_storage]="Storage for the container's disk"
+    [template_storage]="Storage for the container template"
+    [disk]="Disk size in GB"
+    [cpu]="Processor cores"
+    [ram]="Memory in MB"
+    [swap]="Swap in MB"
+    [brg]="Network bridge"
+    [vlan]="VLAN tag (empty for none)"
+    [mac]="MAC address (empty for automatic)"
+    [net]="IPv4: dhcp, or an address with prefix length (a.b.c.d/24)"
+    [gateway]="Gateway (only with a fixed address)"
+    [expect_ip]="Address DHCP must hand out (empty to skip the check)"
+    [gpu]="GPU render device to share (none for no GPU)"
+    [gpu_gid]="Group ID of the render group inside the container"
+    [timezone]="Time zone (host, or a name such as Europe/London)"
+    [tags]="Proxmox tags (separated by ;)"
+    [onboot]="Start at boot (yes or no)"
+    [env_dir]="Directory where Jarvis keeps its .env files"
+    [secrets]="How the .env files are kept (plain or sops)"
+    [model]="Local model Jarvis thinks with, as Ollama names it (none for no local model)"
+    [embed_model]="Local model for searching notes by meaning (none to leave it out)"
+    [panel_allow]="Addresses that may reach Jarvis's panel port: the desktop container (commas between; empty for nobody)"
+    [brain]="Container ID of the Jarvis brain on this node, whose panel this desktop shows (empty for none)"
+    [desktop_allow]="Addresses that may open the desktop: your reverse proxy (commas between; empty for nobody)"
+    [desktop_origin]="Web address the desktop is opened at, such as https://desktop.example.org"
+    [release]="Updates follow (signed or branch)"
+    [branch]="Branch to follow (only with release=branch)"
+    [repo]="GitHub repository (owner/name)"
+    [allow_low_memory]="Install even if the node is short of memory (yes or no)"
+)
+UNATTENDED=0
+RESUME=0
+CARRY=0
+CTID=""
+WORK=""
+
+msg() { printf '\n== %s\n' "$*"; }
+note() { printf '   %s\n' "$*"; }
+warn() { printf 'jarvis-install: WARNING: %s\n' "$*" >&2; }
+# A stop that was explained ends with a code of its own, so that it is told from a stop that was not (on_error);
+# the installer itself still ends with 1 (finish).
+EXPLAINED=78
+die() { printf '\njarvis-install: %s\n' "$*" >&2; exit "$EXPLAINED"; }
+
+cleanup() {
+    [ -z "$WORK" ] || rm -rf "${WORK:?}"
+    [ -z "${JARVIS_SRC_TMP:-}" ] || rm -rf "${JARVIS_SRC_TMP:?}"
+}
+
+finish() {  # the last thing that runs, however the installer ends
+    local code=$?
+    cleanup
+    [ "$code" != "$EXPLAINED" ] || exit 1
+    exit "$code"
+}
+
+# The installer stops at the first command that fails. Where that is expected it says why (die). Where it is
+# not, it must not end without a word: the command and its code are named. (Only in the installer itself,
+# not in the pieces it runs to collect an answer, which report through it.)
+LAST_IN_CT=""
+on_error() {  # on_error CODE COMMAND
+    [ "$BASHPID" = "$$" ] || return 0
+    [ "$1" != "$EXPLAINED" ] || return 0
+    printf '\njarvis-install: stopped where it should not have. This command ended with code %s:\n   %s\n' "$1" "$2" >&2
+    case "$2" in
+        *'pct exec "$CTID"'*|in_ct*) [ -z "$LAST_IN_CT" ] || printf '   (inside container %s: %s)\n' "$CTID" "$LAST_IN_CT" >&2 ;;
+    esac
+    printf '%s\n' "Nothing after it was done. Running the installer again carries on from where it stopped." >&2
+}
+
+# Runs a command inside the container. It never gets this node's terminal or environment.
+in_ct() {
+    LAST_IN_CT="$*"
+    pct exec "$CTID" --keep-env 0 -- env HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$@" </dev/null
+}
+
+# ---------------------------------------------------------------- settings
+
+is_known() {
+    local key
+    for key in "${KNOWN_KEYS[@]}"; do
+        [ "$key" = "$1" ] && return 0
+    done
+    return 1
+}
+
+is_ipv4() {
+    local a b c d o octet='(0|[1-9][0-9]{0,2})'
+    [[ "$1" =~ ^$octet\.$octet\.$octet\.$octet$ ]] || return 1
+    a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+    for o in "$a" "$b" "$c" "$d"; do
+        [ "$o" -le 255 ] || return 1
+    done
+}
+
+in_range() { [[ "$1" =~ ^(0|[1-9][0-9]{0,8})$ ]] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
+
+# Addresses, or networks written address/bits, with commas between: 192.0.2.7,198.51.100.0/24
+# A network must be written by its first address. The same rule as in misc/install.func, which applies it
+# again inside the container.
+address_list_ok() {
+    local item host bits rest="$1," a b c d number
+    [ "${#1}" -le 400 ] || return 1
+    while [ -n "$rest" ]; do
+        item="${rest%%,*}"
+        rest="${rest#*,}"
+        host="${item%%/*}"
+        is_ipv4 "$host" || return 1
+        if [ "$item" != "$host" ]; then
+            bits="${item#*/}"
+            in_range "$bits" 8 32 || return 1  # nothing wider than a /8
+            IFS=. read -r a b c d <<<"$host"
+            number=$(((a << 24) | (b << 16) | (c << 8) | d))
+            [ $((number & ((1 << (32 - bits)) - 1))) -eq 0 ] || return 1
+        fi
+    done
+}
+
+# The web address a page is opened at, as a browser names it. The same rule as in misc/install.func.
+origin_ok() {
+    [[ "$1" =~ ^https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:([1-9][0-9]{0,4}))?$ ]] || return 1
+    [ -z "${BASH_REMATCH[3]}" ] || { [ "${BASH_REMATCH[3]}" -le 65535 ] && [ "${BASH_REMATCH[3]}" -ne 443 ]; }
+}
+
+# A model as Ollama names it (qwen3:8b, library/name:tag), or none. The same rule as in misc/install.func.
+model_ok() {
+    [ "$1" = "none" ] && return 0
+    [ "${#1}" -le 100 ] || return 1
+    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*){0,2}(:[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]]
+}
+
+# The same rule as env_dir_ok in misc/install.func, which applies it again inside the container.
+env_dir_ok() {
+    local v="$1"
+    [[ "$v" =~ ^/(etc/jarvis|srv|opt|mnt|media)(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$ ]] || return 1
+    [ "${#v}" -le 200 ] || return 1
+    case "$v/" in /opt/jarvis/*) return 1 ;; esac
+}
+
+# valid KEY VALUE: true when VALUE is acceptable for KEY. Every value later lands in a command line or in
+# a settings file, so each has a strict shape.
+valid() {
+    local key="$1" v="$2"
+    case "$key" in
+        ctid) in_range "$v" 100 999999999 ;;
+        hostname) [[ "$v" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] ;;
+        container_storage|template_storage|brg) [[ "$v" =~ ^[A-Za-z][A-Za-z0-9._-]{0,63}$ ]] ;;
+        disk) in_range "$v" 8 4000 ;;
+        cpu) in_range "$v" 1 512 ;;
+        ram) in_range "$v" 512 4194304 ;;
+        swap) in_range "$v" 0 4194304 ;;
+        vlan) [ -z "$v" ] || in_range "$v" 1 4094 ;;
+        # A network card's own address: the second digit is even (an odd one marks a group address).
+        mac) [ -z "$v" ] || [[ "$v" =~ ^[0-9A-Fa-f][02468ACEace](:[0-9A-Fa-f]{2}){5}$ ]] ;;
+        net)
+            [ "$v" = "dhcp" ] && return 0
+            [[ "$v" =~ ^([0-9.]+)/([0-9]{1,2})$ ]] || return 1
+            local host="${BASH_REMATCH[1]}" bits="${BASH_REMATCH[2]}"
+            is_ipv4 "$host" && in_range "$bits" 1 32
+            ;;
+        gateway|expect_ip) [ -z "$v" ] || is_ipv4 "$v" ;;
+        gpu) [ "$v" = "none" ] || [[ "$v" =~ ^/dev/[A-Za-z0-9_/-]{1,64}$ && "$v" != *..* ]] ;;
+        gpu_gid) in_range "$v" 1 65535 ;;
+        timezone) [[ "$v" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$ ]] && timezone_ok "$v" ;;
+        tags) [[ "$v" =~ ^[a-z0-9_][a-z0-9_.+-]*(\;[a-z0-9_][a-z0-9_.+-]*)*$ ]] ;;
+        onboot|allow_low_memory) [ "$v" = "yes" ] || [ "$v" = "no" ] ;;
+        env_dir) env_dir_ok "$v" ;;
+        secrets) [ "$v" = "plain" ] || [ "$v" = "sops" ] ;;
+        model|embed_model) model_ok "$v" ;;
+        desktop_allow|panel_allow) [ -z "$v" ] || address_list_ok "$v" ;;
+        brain) [ -z "$v" ] || in_range "$v" 100 999999999 ;;
+        desktop_origin) [ -z "$v" ] || origin_ok "$v" ;;
+        release) [ "$v" = "signed" ] || [ "$v" = "branch" ] ;;
+        branch) [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ && "$v" != *..* ]] ;;
+        repo) [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$ ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Settings given in the environment win over the answers file, which wins over the defaults.
+settings_from_env() {
+    local key name
+    for key in "${KNOWN_KEYS[@]}"; do
+        name="var_$key"
+        if [ -n "${!name+set}" ]; then
+            S[$key]="${!name}"
+            FROM_ENV[$key]=1
+            GIVEN[$key]=1
+        fi
+    done
+}
+
+# The answers file is read line by line and never executed: var_name=value, optional quotes, # comments.
+settings_from_file() {
+    local file="$1" line key value n=0
+    [ -f "$file" ] && [ -r "$file" ] || die "the answers file $file cannot be read. Nothing was changed."
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        [[ "$line" =~ ^var_([a-z0-9_]+)=(.*)$ ]] \
+            || die "$file line $n is not of the form var_name=value. Nothing was changed."
+        key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        is_known "$key" || die "$file line $n: var_$key is not a setting of this installer. Nothing was changed."
+        [ -n "${FROM_ENV[$key]:-}" ] || S[$key]="$value"
+        GIVEN[$key]=1
+    done < "$file"
+}
+
+first_storage() {  # first_storage CONTENT PREFERRED
+    local names
+    names="$(pvesm status --content "$1" 2>/dev/null | awk 'NR > 1 && $3 == "active" {print $1}' || true)"
+    if grep -qx "$2" <<<"$names"; then
+        printf '%s' "$2"
+    else
+        head -n 1 <<<"$names"
+    fi
+}
+
+first_gpu() {
+    local node
+    for node in /dev/dri/renderD*; do
+        if [ -c "$node" ]; then
+            printf '%s' "$node"
+            return
+        fi
+    done
+    printf 'none'
+}
+
+default_for() {
+    local key="$1"
+    if [ -n "${ROLE_DEFAULTS[$key]+set}" ]; then
+        printf '%s' "${ROLE_DEFAULTS[$key]}"
+        return
+    fi
+    case "$key" in
+        ctid) pvesh get /cluster/nextid 2>/dev/null || true ;;
+        container_storage) first_storage rootdir local-lvm ;;
+        template_storage) first_storage vztmpl local ;;
+        brg) printf 'vmbr0' ;;
+        net) printf 'dhcp' ;;
+        gpu) first_gpu ;;
+        gpu_gid) printf '993' ;;  # the render group of an Ubuntu 24.04 container; corrected after the first start
+        timezone) printf 'host' ;;
+        tags) printf 'jarvis' ;;
+        onboot) printf 'yes' ;;
+        env_dir) printf '/etc/jarvis/secrets' ;;
+        secrets) printf 'plain' ;;
+        model) printf 'qwen3:8b' ;;
+        embed_model) printf 'qwen3-embedding:0.6b' ;;
+        release) printf 'signed' ;;
+        branch) printf 'main' ;;
+        repo) printf '%s' "${JARVIS_REPO:-ReconBurrito/jarvis}" ;;
+        allow_low_memory) printf 'no' ;;
+        *) printf '' ;;  # vlan, mac, gateway, expect_ip: empty means not used
+    esac
+}
+
+settings_defaults() {
+    local key
+    for key in "${KNOWN_KEYS[@]}"; do
+        [ -n "${S[$key]+set}" ] || S[$key]="$(default_for "$key")"
+    done
+}
+
+settings_check() {
+    local key bad=()
+    for key in "${KNOWN_KEYS[@]}"; do
+        valid "$key" "${S[$key]}" || bad+=("var_$key='${S[$key]}'")
+    done
+    [ "${#bad[@]}" -eq 0 ] || die "these settings are missing or not valid: ${bad[*]}. Nothing was changed."
+    if [ "${S[net]}" != "dhcp" ] && [ -z "${S[gateway]}" ]; then
+        die "var_gateway is needed with a fixed address. Nothing was changed."
+    fi
+}
+
+# Proxmox accepts host, UTC, or a zone listed in zone.tab.
+timezone_ok() {
+    [ "$1" = "host" ] || [ "$1" = "UTC" ] \
+        || awk -v zone="$1" '!/^#/ && $3 == zone {found = 1} END {exit !found}' /usr/share/zoneinfo/zone.tab 2>/dev/null
+}
+
+# ---------------------------------------------------------------- questions
+
+# Every question goes through ask_text, ask_choice or ask_yes. In unattended mode reaching one is a fault.
+no_questions() {
+    [ "$UNATTENDED" = "0" ] || die "internal fault: a question was reached in unattended mode ($1). Nothing was changed."
+}
+
+use_whiptail() { [ "${JARVIS_PLAIN:-0}" != "1" ] && command -v whiptail >/dev/null 2>&1; }
+
+ask_text() {  # ask_text PROMPT DEFAULT
+    local reply
+    no_questions "$1"
+    if use_whiptail; then
+        reply="$(whiptail --backtitle "Jarvis installer" --title "Jarvis $ROLE" --inputbox "$1" 10 74 "$2" \
+            3>&1 1>/dev/tty 2>&3 </dev/tty)" || die "stopped. Nothing was changed."
+    else
+        printf '%s [%s]: ' "$1" "$2" >/dev/tty
+        IFS= read -r reply </dev/tty || die "stopped. Nothing was changed."
+        [ -n "$reply" ] || reply="$2"
+    fi
+    printf '%s' "$reply"
+}
+
+ask_choice() {  # ask_choice PROMPT DEFAULT TAG TEXT [TAG TEXT]...
+    local prompt="$1" default="$2" reply i
+    shift 2
+    no_questions "$prompt"
+    if use_whiptail; then
+        reply="$(whiptail --backtitle "Jarvis installer" --title "Jarvis $ROLE" --default-item "$default" \
+            --menu "$prompt" 16 74 6 "$@" 3>&1 1>/dev/tty 2>&3 </dev/tty)" || die "stopped. Nothing was changed."
+    else
+        {
+            printf '%s\n' "$prompt"
+            for ((i = 1; i <= $#; i += 2)); do
+                printf '  %s: %s\n' "${!i}" "${@:i+1:1}"
+            done
+            printf 'Choice [%s]: ' "$default"
+        } >/dev/tty
+        IFS= read -r reply </dev/tty || die "stopped. Nothing was changed."
+        [ -n "$reply" ] || reply="$default"
+    fi
+    printf '%s' "$reply"
+}
+
+ask_yes() {  # ask_yes PROMPT: true for yes
+    local reply
+    no_questions "$1"
+    if use_whiptail; then
+        whiptail --backtitle "Jarvis installer" --title "Jarvis $ROLE" --yesno "$1" 16 78 </dev/tty >/dev/tty
+    else
+        printf '%s [y/N]: ' "$1" >/dev/tty
+        IFS= read -r reply </dev/tty || return 1
+        [[ "$reply" =~ ^[Yy] ]]
+    fi
+}
+
+ask_setting() {  # asks until the answer is valid; a setting given in the environment is not asked
+    local key="$1" reply
+    [ -z "${FROM_ENV[$key]:-}" ] || return 0
+    while true; do
+        case "$key" in
+            secrets)
+                reply="$(ask_choice "${LABEL[$key]}" "${S[$key]}" \
+                    plain "Plain .env files, readable by root and jarvis only" \
+                    sops "Encrypted with sops and age, opened with a passphrase")" || exit 1
+                ;;
+            release)
+                reply="$(ask_choice "${LABEL[$key]}" "${S[$key]}" \
+                    signed "Signed releases only (recommended)" \
+                    branch "A branch, unchecked (development)")" || exit 1
+                ;;
+            *) reply="$(ask_text "${LABEL[$key]}" "${S[$key]}")" || exit 1 ;;
+        esac
+        if valid "$key" "$reply"; then
+            # An answer that differs from what was offered is a setting named, also for a container that
+            # exists already. An offer merely accepted is not: it must not replace what that container has.
+            [ "$reply" = "${S[$key]}" ] || GIVEN[$key]=1
+            S[$key]="$reply"
+            return 0
+        fi
+        printf 'That is not a valid value for: %s\n' "${LABEL[$key]}" >/dev/tty
+    done
+}
+
+uses() {  # uses KEY: whether this role and these answers make the setting matter
+    case "$1" in
+        env_dir|secrets|model|panel_allow) [ "$ROLE" = "brain" ] ;;
+        embed_model) [ "$ROLE" = "brain" ] && [ "${S[model]}" != "none" ] ;;
+        desktop_allow|desktop_origin|brain) [ "$ROLE" = "desktop" ] ;;
+        gateway) [ "${S[net]}" != "dhcp" ] ;;
+        expect_ip) [ "${S[net]}" = "dhcp" ] ;;
+        gpu_gid) [ "${S[gpu]}" != "none" ] ;;
+        branch) [ "${S[release]}" = "branch" ] ;;
+        *) return 0 ;;
+    esac
+}
+
+summary() {
+    local network="${S[brg]}" gpu="none" updates
+    [ -z "${S[vlan]}" ] || network+=", VLAN ${S[vlan]}"
+    [ -z "${S[mac]}" ] || network+=", MAC ${S[mac]}"
+    if [ "${S[net]}" = "dhcp" ]; then
+        network+=", address by DHCP"
+        [ -z "${S[expect_ip]}" ] || network+=" (must be ${S[expect_ip]})"
+    else
+        network+=", ${S[net]} via ${S[gateway]}"
+    fi
+    [ "${S[gpu]}" = "none" ] || gpu="${S[gpu]} (group ${S[gpu_gid]})"
+    if [ "${S[release]}" = "signed" ]; then
+        updates="signed releases of ${S[repo]}"
+    else
+        updates="branch ${S[branch]} of ${S[repo]}, unchecked"
+    fi
+    printf 'Container:   %s %s on %s (template from %s)\n' "${S[ctid]}" "${S[hostname]}" "${S[container_storage]}" "${S[template_storage]}"
+    printf 'Size:        %s cores, %s MB memory, %s MB swap, %s GB disk\n' "${S[cpu]}" "${S[ram]}" "${S[swap]}" "${S[disk]}"
+    printf 'Network:     %s\n' "$network"
+    printf 'GPU:         %s\n' "$gpu"
+    printf 'Other:       time zone %s, tags %s, start at boot %s\n' "${S[timezone]}" "${S[tags]}" "${S[onboot]}"
+    if [ "$ROLE" = "brain" ]; then
+        printf '.env files:  %s (%s)\n' "${S[env_dir]}" "${S[secrets]}"
+        if [ "${S[model]}" = "none" ]; then
+            printf 'Models:      no local model\n'
+        else
+            printf 'Models:      %s (fetched at install, several GB); for searching notes: %s\n' "${S[model]}" "${S[embed_model]}"
+        fi
+        printf 'Panel:       Jarvis may be reached by %s\n' "${S[panel_allow]:-nobody yet}"
+    else
+        printf 'Desktop:     may be opened by %s, at %s\n' "${S[desktop_allow]:-nobody yet}" "${S[desktop_origin]:-no web address yet}"
+        if [ -n "${S[brain]}" ]; then
+            printf 'Brain:       container %s on this node\n' "${S[brain]}"
+        else
+            printf 'Brain:       none yet (the panel stays a placeholder)\n'
+        fi
+    fi
+    printf 'Updates:     %s\n' "$updates"
+}
+
+# The ID of a container on this node that this installer made for this role, if there is one.
+existing_container() {
+    local file
+    for file in /etc/pve/lxc/*.conf; do
+        [ -f "$file" ] || continue
+        if grep -qxF "#$(marker)" "$file"; then
+            basename "$file" .conf
+            return 0
+        fi
+    done
+}
+
+wizard() {
+    local mode key found pick
+    mode="$(ask_choice "Create the Jarvis $ROLE container" default \
+        default "Default settings" \
+        advanced "Advanced settings (every setting is asked)" \
+        quit "Leave without changing anything")" || exit 1
+    [ "$mode" = "default" ] || [ "$mode" = "advanced" ] || die "stopped. Nothing was changed."
+    # Without an ID given, a second run would otherwise make a second container beside the first.
+    if [ -z "${FROM_ENV[ctid]:-}" ]; then
+        found="$(existing_container)"
+        if [ -n "$found" ]; then
+            pick="$(ask_choice "Container $found was made by this installer for the $ROLE role." carry \
+                carry "Carry on setting up container $found" \
+                new "Create another container")" || exit 1
+            if [ "$pick" != "new" ]; then
+                # Its install carries on with the settings it has; only what was given by name is applied.
+                S[ctid]="$found"
+                CARRY=1
+                settings_check
+                return 0
+            fi
+        fi
+    fi
+    case "$mode" in
+        default)
+            # The owner always chooses where the .env files live and which model Jarvis thinks with (it is
+            # several GB to fetch); everything else keeps its default. The same goes for who may open the
+            # desktop and reach Jarvis's panel: without an answer nobody can. And the desktop is asked for its brain.
+            if [ "$ROLE" = "brain" ]; then
+                ask_setting env_dir
+                ask_setting secrets
+                ask_setting model
+                ask_setting panel_allow
+            else
+                ask_setting desktop_allow
+                ask_setting desktop_origin
+                ask_setting brain
+            fi
+            ;;
+        advanced)
+            for key in "${KNOWN_KEYS[@]}"; do
+                [ "$key" != "allow_low_memory" ] || continue
+                if uses "$key"; then
+                    ask_setting "$key"
+                fi
+            done
+            ;;
+        *) die "stopped. Nothing was changed." ;;
+    esac
+    settings_check
+    ask_yes "$(summary)
+
+Create the container with these settings?" || die "stopped. Nothing was changed."
+}
+
+# ---------------------------------------------------------------- the node
+
+# The whole description of a container this installer made, so a note that merely quotes it is not taken for one.
+marker() { printf 'Jarvis %s. Installed by the Jarvis installer (role %s).' "$ROLE" "$ROLE"; }
+
+is_ours() {  # is_ours ID
+    local description
+    description="$(pct config "$1" | sed -n 's/^description: //p' | head -n 1)"
+    [ "${description%\%0A}" = "$(marker)" ]
+}
+
+storage_ok() {  # storage_ok NAME CONTENT
+    pvesm status --storage "$1" --content "$2" 2>/dev/null \
+        | awk -v name="$1" 'NR > 1 && $1 == name && $3 == "active" {found = 1} END {exit !found}'
+}
+
+# Sharing a device with a container (--dev0) came with Proxmox VE 8.2.
+version_ok() {
+    local major minor
+    read -r major minor < <(pveversion 2>/dev/null | sed -n 's#^pve-manager/\([0-9][0-9]*\)\.\([0-9][0-9]*\).*#\1 \2#p')
+    [ -n "${major:-}" ] || return 1
+    [ "$major" -gt 8 ] || { [ "$major" -eq 8 ] && [ "$minor" -ge 2 ]; }
+}
+
+preflight() {
+    local available need
+    CTID="${S[ctid]}"
+    if pct status "$CTID" >/dev/null 2>&1; then
+        is_ours "$CTID" \
+            || die "container $CTID exists and was not made by this installer for the $ROLE role. Nothing was changed."
+        if [ "$UNATTENDED" = "0" ] && [ "$CARRY" = "0" ]; then
+            ask_yes "Container $CTID is here from an earlier run of this installer. Carry on setting it up?" \
+                || die "stopped. Nothing was changed."
+        fi
+        RESUME=1
+        return 0
+    fi
+    if pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | grep -Eq "\"vmid\":${CTID}[,}]"; then
+        die "ID $CTID is in use on another node of the cluster. Nothing was changed."
+    fi
+    ip link show dev "${S[brg]}" >/dev/null 2>&1 || die "bridge ${S[brg]} does not exist on this node. Nothing was changed."
+    storage_ok "${S[container_storage]}" rootdir \
+        || die "storage ${S[container_storage]} is not an active storage for container disks on this node. Nothing was changed."
+    storage_ok "${S[template_storage]}" vztmpl \
+        || die "storage ${S[template_storage]} is not an active storage for container templates on this node. Nothing was changed."
+    if [ "${S[gpu]}" != "none" ] && [ ! -c "${S[gpu]}" ]; then
+        die "${S[gpu]} is not a device on this node, so it cannot be shared with the container. Nothing was changed."
+    fi
+    available="$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)"
+    need="${S[ram]}"
+    if [ "$available" -lt "$need" ] && [ "${S[allow_low_memory]}" != "yes" ]; then
+        if [ "$UNATTENDED" = "1" ]; then
+            die "the node has ${available} MB of memory available and the container is given ${need} MB. Nothing was changed. Set var_allow_low_memory=yes to install anyway."
+        fi
+        ask_yes "The node has ${available} MB of memory available and the container is given ${need} MB. Continue anyway?" \
+            || die "stopped. Nothing was changed."
+    fi
+}
+
+template() {
+    local store="${S[template_storage]}" name file arch
+    arch="$(dpkg --print-architecture)"
+    name="$(pveam list "$store" 2>/dev/null | awk -v want="ubuntu-24[.]04-standard.*_${arch}[.]" '$1 ~ want {print $1}' | sort -V | tail -n 1)"
+    if [ -z "$name" ]; then
+        pveam update >/dev/null 2>&1 || true  # it reports success either way; the list below tells
+        file="$(pveam available --section system | awk -v want="ubuntu-24[.]04-standard.*_${arch}[.]" '$2 ~ want {print $2}' | sort -V | tail -n 1)"
+        [ -n "$file" ] || die "no Ubuntu 24.04 template for $arch is offered (is the node online?). Nothing was changed."
+        pveam download "$store" "$file" >/dev/null \
+            || die "the template download failed (is $store full?). Nothing was changed."
+        name="$store:vztmpl/$file"
+    fi
+    printf '%s' "$name"
+}
+
+create() {
+    local net features onboot=0 args
+    net="name=eth0,bridge=${S[brg]}"
+    [ -z "${S[vlan]}" ] || net+=",tag=${S[vlan]}"
+    [ -z "${S[mac]}" ] || net+=",hwaddr=${S[mac]}"
+    if [ "${S[net]}" = "dhcp" ]; then
+        net+=",ip=dhcp"
+    else
+        net+=",ip=${S[net]},gw=${S[gateway]}"
+    fi
+    features="nesting=1"
+    [ "$ROLE" != "desktop" ] || features+=",keyctl=1"  # Docker inside an unprivileged container needs both
+    [ "${S[onboot]}" != "yes" ] || onboot=1
+    args=(pct create "$CTID" "$1"
+        --hostname "${S[hostname]}" --unprivileged 1 --features "$features"
+        --cores "${S[cpu]}" --memory "${S[ram]}" --swap "${S[swap]}"
+        --rootfs "${S[container_storage]}:${S[disk]}"
+        --net0 "$net" --onboot "$onboot" --tags "${S[tags]}" --timezone "${S[timezone]}"
+        --description "$(marker)")
+    [ "${S[gpu]}" = "none" ] || args+=(--dev0 "${S[gpu]},gid=${S[gpu_gid]}")
+    msg "Creating container $CTID (${S[hostname]})"
+    "${args[@]}" >/dev/null
+    pct start "$CTID"
+}
+
+address() { in_ct ip -4 -o addr show dev eth0 scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}'; }
+
+wait_for_network() {
+    local got="" _
+    for _ in $(seq 1 "${JARVIS_NET_TRIES:-60}"); do
+        got="$(address || true)"
+        [ -z "$got" ] || break
+        sleep "${JARVIS_NET_PAUSE:-2}"
+    done
+    [ -n "$got" ] || die "container $CTID got no address. It was created and left as it is. To carry on with it, run this again with var_ctid=$CTID."
+    if uses expect_ip && [ -n "${S[expect_ip]}" ] && [ "$got" != "${S[expect_ip]}" ]; then
+        die "container $CTID got $got from DHCP, not ${S[expect_ip]}. Give its MAC address a fixed lease on the DHCP server, then run this again with var_ctid=$CTID. The container was left as it is."
+    fi
+    note "address: $got"
+}
+
+# The render device must belong to the container's own render group, whose number the template decides.
+# A second run corrects a device the container already has; it never adds one.
+fix_gpu_group() {
+    local inside current device
+    current="$(pct config "$CTID" | sed -n 's/^dev0: //p' | head -n 1)"
+    if [ "$RESUME" = "1" ]; then
+        device="${current%%,*}"
+    else
+        device="${S[gpu]}"
+        [ "$device" != "none" ] || device=""
+    fi
+    [ -n "$device" ] || return 0
+    inside="$(in_ct getent group render 2>/dev/null | cut -d: -f3 || true)"
+    if ! [[ "$inside" =~ ^[0-9]+$ ]]; then
+        warn "the container has no render group, so $device keeps the group it was given; programs may not be allowed to use the GPU."
+        return 0
+    fi
+    case ",$current," in *",gid=$inside,"*) return 0 ;; esac
+    note "the container's render group is $inside; giving the shared device to it"
+    pct set "$CTID" --dev0 "$device,gid=$inside"
+    pct reboot "$CTID"
+    wait_for_network
+}
+
+# What the container is told. A new container gets every setting, right after it is created, so that a
+# first run that stops later has still handed over what was chosen. A container that has its settings gets
+# only those given by name (in the environment or the answers file): a second run changes nothing nobody
+# asked for.
+SITE_ALL=1
+site_line() {  # site_line KEY NAME VALUE
+    if [ "$SITE_ALL" = "1" ] || [ -n "${GIVEN[$1]:-}" ]; then
+        printf '%s=%s\n' "$2" "$3"
+    fi
+}
+
+hand_over_settings() {
+    local file has=0
+    [ -n "$WORK" ] || WORK="$(mktemp -d)"
+    file="$WORK/site.env"
+    in_ct install -d -m 0755 /etc/jarvis
+    in_ct test -s /etc/jarvis/site.env || has=$?
+    case "$has" in
+        0)
+            SITE_ALL=0
+            site_file > "$file"
+            pct push "$CTID" "$file" /etc/jarvis/site.env.install --perms 0644 >/dev/null
+            ;;
+        1)
+            SITE_ALL=1
+            site_file > "$file"
+            pct push "$CTID" "$file" /etc/jarvis/site.env --perms 0644 >/dev/null
+            ;;
+        *) die "container $CTID could not be asked for its settings (pct exec gave $has). Nothing more was changed. To carry on, run this again with var_ctid=$CTID." ;;
+    esac
+}
+
+site_file() {
+    printf 'JARVIS_ROLE=%s\n' "$ROLE"
+    site_line repo JARVIS_REPO_URL "https://github.com/${S[repo]}.git"
+    site_line release JARVIS_RELEASE_CHANNEL "${S[release]}"
+    site_line branch JARVIS_RELEASE_BRANCH "${S[branch]}"
+    if [ "$ROLE" = "brain" ]; then
+        site_line env_dir JARVIS_ENV_DIR "${S[env_dir]}"
+        site_line secrets JARVIS_SECRETS_MODE "${S[secrets]}"
+        site_line model JARVIS_LOCAL_MODEL "${S[model]}"
+        site_line embed_model JARVIS_EMBED_MODEL "${S[embed_model]}"
+        site_line panel_allow JARVIS_PANEL_ALLOW "${S[panel_allow]}"
+    else
+        site_line desktop_allow JARVIS_DESKTOP_ALLOW "${S[desktop_allow]}"
+        site_line desktop_origin JARVIS_DESKTOP_ORIGIN "${S[desktop_origin]}"
+        site_line brain JARVIS_BRAIN_URL "$BRAIN_URL"
+    fi
+}
+
+# The desktop shows the panel of a brain on this node. Where that brain answers and which certificate
+# authority signs for it are read from the brain's container; nothing in the brain is changed. The authority's
+# certificate is handed to the desktop, whose browser is then told to trust it for the brain's address only.
+BRAIN_URL=""
+BRAIN_CA=""
+from_brain() {  # from_brain ID FILE: a small text file out of the brain's container
+    local got
+    got="$(timeout 30 pct exec "$1" --keep-env 0 -- cat "$2" </dev/null 2>/dev/null | head -c 16384)" || return 1
+    [ -n "$got" ] || return 1
+    printf '%s\n' "$got"
+}
+
+read_brain() {
+    local id="${S[brain]}" site address
+    uses brain && [ -n "$id" ] || return 0
+    # A container that has its settings is told about its brain only when the brain was named for this run.
+    [ "$RESUME" = "0" ] || [ -n "${GIVEN[brain]:-}" ] || return 0
+    [ "$id" != "${S[ctid]}" ] || die "var_brain names the desktop's own container. Nothing was changed."
+    [ "$(pct status "$id" 2>/dev/null | awk '{print $2}')" = "running" ] \
+        || die "container $id (var_brain) is not a running container on this node. Nothing was changed."
+    # The brain is asked like any container that may not be what it seems: nothing of this node's
+    # environment or keyboard goes in, it gets half a minute, and no more than a few thousand bytes are taken.
+    site="$(from_brain "$id" /etc/jarvis/site.env)" \
+        || die "container $id (var_brain) could not be asked for its settings. Nothing was changed."
+    [ "$(sed -n 's/^JARVIS_ROLE=//p' <<<"$site" | tail -n 1)" = "brain" ] \
+        || die "container $id (var_brain) is not a Jarvis brain. Nothing was changed."
+    address="$(sed -n 's/^JARVIS_ADDRESS=//p' <<<"$site" | tail -n 1)"
+    is_ipv4 "$address" || die "the brain in container $id has no panel service yet. Update it first (pct exec $id -- update), then run this again. Nothing was changed."
+    [ -n "$WORK" ] || WORK="$(mktemp -d)"
+    from_brain "$id" /etc/jarvis/tls/ca.pem > "$WORK/brain-ca.pem" \
+        || die "the brain in container $id did not hand over its certificate authority. Nothing was changed."
+    # One certificate and nothing else: it ends up in the desktop browser's list of what to trust.
+    [ "$(grep -Ec -- '^-{5}BEGIN CERTIFICATE-{5}$' "$WORK/brain-ca.pem")" = "1" ] \
+        && [ "$(grep -Ec -- '-{5}BEGIN' "$WORK/brain-ca.pem")" = "1" ] \
+        && openssl x509 -in "$WORK/brain-ca.pem" -noout >/dev/null 2>&1 \
+        || die "what the brain in container $id handed over as its certificate authority is not one certificate. Nothing was changed."
+    BRAIN_URL="https://$address:8443"
+    BRAIN_CA="$WORK/brain-ca.pem"
+    note "brain: container $id at $BRAIN_URL"
+}
+
+# The brain checks the Proxmox API's certificates against the cluster's own certificate authority, which every
+# node of the cluster has. It is handed over on every run, so a renewed one reaches the brain the same way.
+PVE_CA="${JARVIS_PVE_CA:-/etc/pve/pve-root-ca.pem}"
+hand_over_trust() {
+    [ "$ROLE" = "brain" ] || return 0
+    if [ ! -s "$PVE_CA" ] || [ "$(grep -Ec -- '^-{5}BEGIN CERTIFICATE-{5}$' "$PVE_CA")" != "1" ] \
+        || ! openssl x509 -in "$PVE_CA" -noout >/dev/null 2>&1; then
+        warn "$PVE_CA is not one certificate on this node, so Jarvis cannot check the Proxmox API's certificates and gets no Proxmox tools."
+        return 0
+    fi
+    in_ct install -d -m 0755 /etc/jarvis/trust
+    pct push "$CTID" "$PVE_CA" /etc/jarvis/trust/proxmox-ca.pem --perms 0644 </dev/null >/dev/null
+    note "the cluster's certificate authority is handed to the brain"
+}
+
+hand_over_brain() {
+    [ -n "$BRAIN_CA" ] || return 0
+    pct push "$CTID" "$BRAIN_CA" /etc/jarvis/brain-ca.pem --perms 0644 >/dev/null
+}
+
+# Hands the container its settings and the first-run script, which fetches the code, checks it and installs.
+bootstrap() {
+    local file
+    in_ct install -d -m 0700 /root/jarvis-bootstrap
+    # The release signing keys are pinned once. A later run of this installer replaces them only when the
+    # container holds no key at all, and when that cannot be told for certain it stops.
+    local pinned=0
+    in_ct grep -Eqv '^[[:space:]]*(#|$)' /etc/jarvis/allowed_signers 2>/dev/null || pinned=$?
+    case "$pinned" in
+        0) note "release signing keys: already pinned in the container, left as they are" ;;
+        1) pct push "$CTID" "$JARVIS_SRC/trust/allowed_signers" /etc/jarvis/allowed_signers --perms 0644 >/dev/null ;;
+        2)
+            in_ct test ! -e /etc/jarvis/allowed_signers \
+                || die "the release signing keys in container $CTID could not be read. Nothing more was changed."
+            pct push "$CTID" "$JARVIS_SRC/trust/allowed_signers" /etc/jarvis/allowed_signers --perms 0644 >/dev/null
+            ;;
+        *) die "container $CTID could not be asked about its release signing keys (pct exec gave $pinned). Nothing more was changed." ;;
+    esac
+    for file in install/bootstrap.sh misc/install.func misc/release.func; do
+        pct push "$CTID" "$JARVIS_SRC/$file" "/root/jarvis-bootstrap/${file##*/}" --perms 0700 >/dev/null
+    done
+    msg "Installing inside container $CTID"
+    in_ct bash /root/jarvis-bootstrap/bootstrap.sh
+    in_ct rm -rf /root/jarvis-bootstrap
+}
+
+build_main() {
+    trap finish EXIT
+    set -E
+    trap 'on_error "$?" "$BASH_COMMAND"' ERR
+    [ "$(id -u)" -eq 0 ] || die "run this as root on the Proxmox node."
+    local tool
+    for tool in pct pveam pvesm pvesh pveversion; do
+        command -v "$tool" >/dev/null 2>&1 || die "this is not a Proxmox VE node ($tool is missing)."
+    done
+    [ "$ROLE" = "brain" ] || [ "$ROLE" = "desktop" ] || die "internal fault: unknown role '$ROLE'."
+    version_ok || die "Proxmox VE 8.2 or newer is needed. Nothing was changed."
+
+    settings_from_env
+    if [ -n "${JARVIS_ANSWERS:-}" ]; then
+        UNATTENDED=1
+        settings_from_file "$JARVIS_ANSWERS"
+        # A named ID is what lets a second run find the container of the first.
+        [ -n "${S[ctid]+set}" ] || die "var_ctid is needed when the answers come from a file. Nothing was changed."
+    fi
+    settings_defaults
+    if [ "$UNATTENDED" = "1" ]; then
+        settings_check
+    else
+        # /dev/tty exists even without a terminal; only opening it tells.
+        (: </dev/tty >/dev/tty) 2>/dev/null \
+            || die "there is no terminal to ask on. Nothing was changed. Give the settings in a file: JARVIS_ANSWERS=/path/to/file.vars"
+        wizard
+    fi
+
+    preflight
+    read_brain
+    if [ "$RESUME" = "1" ]; then
+        [ "$(pct status "$CTID" | awk '{print $2}')" = "running" ] || pct start "$CTID"
+    else
+        local tmpl
+        tmpl="$(template)"
+        create "$tmpl"
+    fi
+    hand_over_settings
+    hand_over_brain
+    wait_for_network
+    hand_over_trust
+    fix_gpu_group
+    bootstrap
+    msg "Container $CTID is installed: Jarvis $ROLE at $(address)"
+    note "To update it later: pct enter $CTID, then type: update"
+    if [ "$ROLE" = "brain" ]; then
+        note "To show Jarvis's panel on a desktop: name the desktop container's address here (var_panel_allow), and give the desktop's installer var_brain=$CTID"
+    elif [ -n "$BRAIN_URL" ]; then
+        note "This desktop shows the panel of the brain at $BRAIN_URL. The brain lets it in once its installer was run with var_panel_allow=$(address)"
+    fi
+}

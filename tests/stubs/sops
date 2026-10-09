@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stand-in for sops in the tests. A vault file here is sops' own lines (sops_...=, in clear as sops writes them)
+# followed by age's armoured text, and "sops decrypt --input-type dotenv --output-type dotenv FILE" opens it
+# with the identity named in SOPS_AGE_KEY_FILE, as sops does. So a wrong or missing identity fails as with
+# sops, through age itself, with sops' code and first line. (tests/core/test_vault.py also runs the real sops
+# where it is found: JARVIS_TEST_SOPS.)
+set -euo pipefail
+[ "$#" = 6 ] && [ "$1 $2 $3 $4 $5" = "decrypt --input-type dotenv --output-type dotenv" ] \
+    || { echo "sops stub: unexpected arguments: $*" >&2; exit 64; }
+file="$6"
+[ -r "$file" ] || { echo "Error: open $file: permission denied" >&2; exit 1; }
+if [ -z "${SOPS_AGE_KEY_FILE:-}" ] || [ ! -r "$SOPS_AGE_KEY_FILE" ] \
+    || ! grep -v '^sops_' "$file" | age -d -i "$SOPS_AGE_KEY_FILE" 2>/dev/null; then
+    echo "Failed to get the data key required to decrypt the SOPS file." >&2
+    exit 128
+fi

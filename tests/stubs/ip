@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stand-in for ip, on the "node" (bridges) and in the "container" (its address).
+set -euo pipefail
+case "$*" in
+    "link show dev nobridge") echo 'Device "nobridge" does not exist.' >&2; exit 1 ;;
+    "link show dev "*) exit 0 ;;
+    "-4 -o addr show dev eth0 scope global")
+        # no-eth0: the container has no such card, which the real ip says with a failure.
+        [ ! -f "$STUB_STATE/no-eth0" ] || { echo 'Device "eth0" does not exist.' >&2; exit 1; }
+        [ -s "$STUB_STATE/address" ] || exit 0
+        printf '2: eth0    inet %s/24 brd 192.0.2.255 scope global eth0\\       valid_lft forever preferred_lft forever\n' "$(cat "$STUB_STATE/address")"
+        ;;
+    *) exit 64 ;;
+esac

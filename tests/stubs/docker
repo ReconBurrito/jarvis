@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Stand-in for docker inside the "container". It remembers which image is there, which Docker file the
+# desktop was started from, and whether it runs. A test steers it with files in $STUB_STATE:
+#   fail-pull, fail-up    that step fails
+#   sandbox               the exit status the sandbox check ends with (default 0)
+#   no-tools              the image lacks the programs the session script needs
+#   no-launchers          the image's Chromium launchers are not ours
+#   menu-no-sandbox, running-no-sandbox   something starts, or runs, a browser without its sandbox
+#   other-uid             the desktop's user is not user 1000
+#   no-bwrap              the image's bwrap is not ours
+#   session               the exit status the session check ends with (default 0)
+#   pages-reach           holds ADDRESS/PORT: a program of the desktop's user can connect there
+set -euo pipefail
+state="$STUB_STATE"
+printf 'docker %s\n' "$*" >> "$state/calls"
+image_of() { sed -n 's/^    image: //p' "$1"; }
+case "$1" in
+    image)  # image inspect NAME
+        grep -qxF "$3" "$state/docker-images" 2>/dev/null
+        ;;
+    compose)  # compose -f FILE ACTION ...
+        file="$3"
+        case "$4" in
+            pull)
+                [ ! -f "$state/fail-pull" ] || { echo "pull access denied" >&2; exit 1; }
+                image_of "$file" >> "$state/docker-images"
+                ;;
+            up)
+                [ ! -f "$state/fail-up" ] || { echo "cannot start" >&2; exit 1; }
+                grep -qxF "$(image_of "$file")" "$state/docker-images" 2>/dev/null || image_of "$file" >> "$state/docker-images"
+                cmp -s "$file" "$state/docker-running" 2>/dev/null || echo made >> "$state/docker-made"
+                cp "$file" "$state/docker-running"
+                echo up > "$state/docker-state"
+                ;;
+            stop) echo stopped > "$state/docker-state" ;;
+            *) exit 64 ;;
+        esac
+        ;;
+    inspect)  # inspect -f FORMAT NAME
+        [ -f "$state/docker-running" ] || { echo "No such object: $4" >&2; exit 1; }
+        running=false
+        [ "$(cat "$state/docker-state")" != "up" ] || running=true
+        printf '%s|%s|%s\n' "$running" "$(image_of "$state/docker-running")" \
+            "$(sed -n 's/^      jarvis.files: "\(.*\)"$/\1/p' "$state/docker-running")"
+        ;;
+    exec)  # exec -u abc -e ... NAME COMMAND ...
+        [ "$(cat "$state/docker-state" 2>/dev/null)" = "up" ] || { echo "container is not running" >&2; exit 1; }
+        while [ "$1" != "jarvis-desktop" ]; do shift; done
+        shift
+        case "$1" in
+            /opt/jarvis-desktop/sandbox-check.sh)
+                [ "${2:-}" = "/usr/bin/chromium" ] || { echo "the check was not pointed at the launcher" >&2; exit 64; }
+                code="$(cat "$state/sandbox" 2>/dev/null || echo 0)"
+                case "$code" in
+                    0) printf '%s\n' "sandbox layer 1, own namespaces: on" "sandbox layer 2, own system-call filter: on" ;;
+                    1) printf '%s\n' "sandbox layer 1, own namespaces: OFF" "sandbox layer 2, own system-call filter: on" ;;
+                    *) echo "sandbox check: the browser did not start a page process." >&2 ;;
+                esac
+                exit "$code"
+                ;;
+            /opt/jarvis-desktop/session-check.sh)
+                code="$(cat "$state/session" 2>/dev/null || echo 0)"
+                case "$code" in
+                    0) ;;
+                    1) printf '%s\n' "the desktop's session ended within 30 seconds of its start (sessions started since the desktop came up: 4): it does not stay up" \
+                                    "the desktop's bar (xfce4-panel) is not running" ;;
+                    *) echo "session check: how long the session has run could not be read." >&2 ;;
+                esac
+                exit "$code"
+                ;;
+            cmp) [ "$*" = "cmp -s /usr/bin/bwrap /opt/jarvis-desktop/bwrap" ] && [ ! -f "$state/no-bwrap" ] ;;
+            sh)
+                case "$3" in
+                    *"command -v"*) [ ! -f "$state/no-tools" ] ;;
+                    *"cmp -s"*) [ ! -f "$state/no-launchers" ] ;;
+                    *"ps -e"*) [ -f "$state/running-no-sandbox" ] ;;
+                    *) exit 64 ;;
+                esac
+                ;;
+            grep) [ -f "$state/menu-no-sandbox" ] ;;
+            id) if [ -f "$state/other-uid" ]; then echo 911; else echo 1000; fi ;;
+            bash)  # a connection tried from inside, as the desktop's user: refused unless the test says otherwise
+                case "$3" in
+                    "exec 3<>/dev/tcp/"*) [ -f "$state/pages-reach" ] && [[ "$3" == *"$(cat "$state/pages-reach")" ]] ;;
+                    *) exit 64 ;;
+                esac
+                ;;
+            *) exit 64 ;;
+        esac
+        ;;
+    *) echo "docker stub: no '$1'" >&2; exit 64 ;;
+esac

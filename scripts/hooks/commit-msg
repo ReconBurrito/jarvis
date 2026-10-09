@@ -1,0 +1,3 @@
+#!/bin/sh
+# Refuses a commit whose message carries secrets or site details: a message is as public as a file.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/leak_gate.py" --message "$1"

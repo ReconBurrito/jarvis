@@ -1,0 +1,7 @@
+#!/bin/bash
+# Chromium for this desktop, always with its sandbox. The image's own launchers switch the sandbox off
+# whenever they see a system-call filter on the container, and inside a Proxmox container there always is
+# one; the sandbox works there all the same. This file takes the place of both launchers (the install
+# script mounts it over them, and checks after every install that it is still there).
+# The desktop is stopped and made anew by every update, which is not a crash to ask about: no "Restore pages?".
+exec /usr/bin/chromium-browser --no-first-run --password-store=basic --hide-crash-restore-bubble "$@"

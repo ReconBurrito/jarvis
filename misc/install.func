@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Helpers for the scripts that run inside a Jarvis container (install/*.sh, bin/update).
+
+# pct exec and pct enter start with the host's environment or none at all. Set what the tools need.
+export HOME="${HOME:-/root}"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
+# Root's work never happens in a folder somebody else may write to (a program started there could be handed a
+# file of that folder's owner), and what it creates is readable by the users it is made for.
+cd /
+umask 022
+
+JARVIS_CHECKOUT="${JARVIS_CHECKOUT:-/opt/jarvis}"
+JARVIS_ETC="${JARVIS_ETC:-/etc/jarvis}"
+JARVIS_SITE="$JARVIS_ETC/site.env"
+
+# A message that cannot be written (the terminal went away) never stops the work.
+say() { printf '\n== %s\n' "$*" || true; }
+ok() { printf '   ok: %s\n' "$*" || true; }
+warn() { printf 'jarvis: WARNING: %s\n' "$*" >&2 || true; }
+die() { printf 'jarvis: %s\n' "$*" >&2; exit 1; }
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "run this as root in the container."; }
+
+# site.env holds plain KEY=value lines (no quoting, no secrets). It is read, never sourced.
+site_get() {
+    local key="$1" line
+    [ -r "$JARVIS_SITE" ] || return 0
+    line="$(grep -E "^${key}=" "$JARVIS_SITE" | tail -n 1 || true)"
+    printf '%s' "${line#*=}"
+}
+
+site_set() {
+    local key="$1" value="$2" tmp
+    [[ "$key" =~ ^JARVIS_[A-Z0-9_]+$ ]] || die "site_set: bad key '$key'."
+    [[ "$value" != *$'\n'* ]] || die "site_set: the value of $key spans lines."
+    install -d -m 0755 "$JARVIS_ETC"
+    tmp="$(mktemp "$JARVIS_ETC/.site.XXXXXX")"
+    if [ -f "$JARVIS_SITE" ]; then
+        grep -Ev "^${key}=" "$JARVIS_SITE" > "$tmp" || true
+    fi
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$JARVIS_SITE"
+}
+
+# site_merge FILE: take every JARVIS_ line of FILE into site.env, then remove FILE.
+site_merge() {
+    local file="$1" line
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^(JARVIS_[A-Z0-9_]+)=(.*)$ ]] || continue
+        site_set "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    done < "$file"
+    rm -f "$file"
+}
+
+# Installs the packages that are missing; when none is, apt is not called at all, so an update does not
+# depend on the package servers. A new container's package index is often not ready on the first try.
+apt_install() {
+    local package missing=() attempt log
+    for package in "$@"; do
+        dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$' || missing+=("$package")
+    done
+    [ "${#missing[@]}" -gt 0 ] || return 0
+    log="$(mktemp)"
+    for attempt in 1 2 3 4; do
+        if apt-get -o DPkg::Lock::Timeout=120 update -q >"$log" 2>&1 \
+            && apt-get -o DPkg::Lock::Timeout=120 install -y -q --no-install-recommends "${missing[@]}" >"$log" 2>&1; then
+            rm -f "$log"
+            return 0
+        fi
+        [ "$attempt" -eq 4 ] || sleep "${JARVIS_APT_PAUSE:-10}"
+    done
+    tail -n 5 "$log" >&2
+    rm -f "$log"
+    die "could not install: ${missing[*]}"
+}
+
+# The folder for the .env files must be a place that survives a restart, that Jarvis itself cannot replace,
+# and that is not a system folder. misc/build.func applies the same rule on the Proxmox node.
+env_dir_ok() {
+    local v="$1"
+    [[ "$v" =~ ^/(etc/jarvis|srv|opt|mnt|media)(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$ ]] || return 1
+    [ "${#v}" -le 200 ] || return 1
+    case "$v/" in /opt/jarvis/*) return 1 ;; esac
+}
+
+# Addresses, or networks written address/bits, with commas between: 192.0.2.7,198.51.100.0/24
+# A network must be written by its first address. misc/build.func applies the same rule on the node.
+address_list_ok() {
+    local item host bits rest="$1," a b c d number octet='(0|[1-9][0-9]{0,2})'
+    [ "${#1}" -le 400 ] || return 1
+    while [ -n "$rest" ]; do
+        item="${rest%%,*}"
+        rest="${rest#*,}"
+        host="${item%%/*}"
+        [[ "$host" =~ ^$octet\.$octet\.$octet\.$octet$ ]] || return 1
+        a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+        [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+        if [ "$item" != "$host" ]; then
+            bits="${item#*/}"
+            [[ "$bits" =~ ^([89]|[12][0-9]|3[0-2])$ ]] || return 1  # nothing wider than a /8
+            number=$(((a << 24) | (b << 16) | (c << 8) | d))
+            [ $((number & ((1 << (32 - bits)) - 1))) -eq 0 ] || return 1
+        fi
+    done
+}
+
+# The web address a page is opened at, as a browser names it: https, a host name, and a port only when it
+# is not the usual one.
+origin_ok() {
+    [[ "$1" =~ ^https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:([1-9][0-9]{0,4}))?$ ]] || return 1
+    [ -z "${BASH_REMATCH[3]}" ] || { [ "${BASH_REMATCH[3]}" -le 65535 ] && [ "${BASH_REMATCH[3]}" -ne 443 ]; }
+}
+
+# A model as Ollama names it (qwen3:8b, library/name:tag), or none. misc/build.func applies the same rule.
+model_ok() {
+    [ "$1" = "none" ] && return 0
+    [ "${#1}" -le 100 ] || return 1
+    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*){0,2}(:[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]]
+}
+
+own_address() {  # this container's address on its network card; nothing when it has none (or no such card)
+    { ip -4 -o addr show dev eth0 scope global 2>/dev/null || true; } | awk '{sub(/\/.*/, "", $4); print $4; exit}'
+}
+
+ensure_user() {
+    id "$1" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$1"
+}
+
+# write_file FILE MODE: standard input becomes FILE, written beside it and renamed, so a file is never
+# left half written. (Never used as a condition: a failure to write must end the script.)
+write_file() {
+    local file="$1" mode="$2" tmp
+    tmp="$(mktemp "$file.XXXXXX")"
+    cat > "$tmp"
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$file"
+}
+
+# Copy a command into place by rename, so a running copy keeps its own file.
+install_command() {
+    local source="$1" target="$2"
+    if ! cmp -s "$source" "$target" 2>/dev/null; then
+        install -m 0755 "$source" "$target.new"
+        mv -f "$target.new" "$target"
+    fi
+}
+
+script_for_role() {
+    case "$1" in
+        brain) printf 'jarvis-install.sh\n' ;;
+        desktop) printf 'jarvis-desktop-install.sh\n' ;;
+        *) die "unknown role '$1' in $JARVIS_SITE." ;;
+    esac
+}

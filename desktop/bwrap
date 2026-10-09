@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stands in for bubblewrap (bwrap) on this desktop, and always says no.
+#
+# The desktop's programs load every picture, their own icons included, through a loader that first tries
+# to lock itself into a bwrap sandbox. Inside this container bwrap cannot build one: Docker's AppArmor
+# profile forbids the mounts it needs. The loader would take that failure for a broken picture, the
+# desktop's bar and its session program would stop on their first icon, and the desktop would be started
+# again and again. Told plainly that sandboxes of this kind are not available (the words below are the
+# ones the loader, glycin, listens for), it loads pictures without one instead, as it does in any
+# container that forbids them. The other way out, running the desktop without Docker's AppArmor profile,
+# would take a guard away from everything in it, the browser included.
+#
+# Chromium does not use bwrap; its own sandbox is separate and stays on.
+echo "bwrap: No permissions to create a new namespace (bubblewrap sandboxes are not available on this desktop)" >&2
+exit 1

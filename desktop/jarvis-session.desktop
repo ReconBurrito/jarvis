@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Jarvis
+Comment=Keeps Jarvis's panel and browser open and in place
+Exec=/opt/jarvis-desktop/jarvis-session.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true

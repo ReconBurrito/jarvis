@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Jarvis</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="icon.png">
+<!-- The page Jarvis's browser opens with, and every new tab. Opened from disk; fetches nothing. Nothing
+     on it moves, because every change on this desktop is sent to the viewer as video. -->
+<style>
+  @font-face { font-family: "Oxanium"; src: url("Oxanium.ttf"); font-weight: 200 800; }
+  :root { color-scheme: dark; --deep: #04101a; --line: #1a4459; --glow: #5fd6ff; --ice: #d6f2ff; --mute: #7ba6ba; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(70% 90% at 100% 100%, #0b2a3d 0%, rgba(11, 42, 61, 0) 70%), var(--deep);
+    color: var(--ice);
+    font: 400 17px/1.5 "Oxanium", "DejaVu Sans", sans-serif;
+    overflow: hidden;
+    display: grid; align-content: center;
+  }
+  /* The same rings as the panel's dial, many times larger, centred on the corner of the page. */
+  svg { position: fixed; right: -80vmin; bottom: -80vmin; width: 160vmin; height: 160vmin; pointer-events: none; }
+  svg circle { fill: none; stroke: var(--line); }
+  svg .lit { stroke: var(--glow); opacity: .7; }
+  main { position: relative; padding: 0 9vw 6vh; max-width: 46rem; }
+  h1 { margin: 0; font-weight: 300; font-size: clamp(40px, 6.4vw, 84px); line-height: 1.05; letter-spacing: -.01em; }
+  .date { margin: 14px 0 0; font-size: clamp(17px, 1.7vw, 22px); color: var(--glow); }
+  .note { margin: 34px 0 0; max-width: 44ch; color: var(--mute); font-size: 16px; }
+  .note + .note { margin-top: 10px; }
+</style>
+
+<svg viewBox="0 0 320 320" aria-hidden="true">
+  <circle cx="160" cy="160" r="152" stroke-width=".4" stroke-dasharray="1 7"/>
+  <circle cx="160" cy="160" r="138" stroke-width=".5" stroke-dasharray="118 18 46 18 190 18 80 18 220 141"/>
+  <circle class="lit" cx="160" cy="160" r="124" stroke-width="1.6" stroke-dasharray="0 415 90 274"/>
+  <circle cx="160" cy="160" r="124" stroke-width="1.6" opacity=".6"/>
+  <circle cx="160" cy="160" r="110" stroke-width=".5"/>
+  <circle cx="160" cy="160" r="84" stroke-width=".4" stroke-dasharray="40 12"/>
+</svg>
+
+<main>
+  <h1 id="greeting">Good day.</h1>
+  <p class="date" id="date"></p>
+  <p class="note">This is Jarvis's browser. Pages Jarvis opens for you appear in this window, and you can use it yourself.</p>
+  <p class="note">Anything you sign in to here, Jarvis can use too.</p>
+</main>
+
+<script>
+  "use strict";
+  const now = new Date();
+  const hour = now.getHours();
+  document.getElementById("greeting").textContent =
+    hour < 5 ? "Good evening." : hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.";
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                  "October", "November", "December"];
+  document.getElementById("date").textContent =
+    days[now.getDay()] + ", " + now.getDate() + " " + months[now.getMonth()] + " " + now.getFullYear();
+</script>
+</html>
