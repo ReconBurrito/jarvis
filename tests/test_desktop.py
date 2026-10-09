@@ -51,8 +51,15 @@ def test_the_browser_policy_names_only_what_the_desktop_brings():
     assert f'BROWSER_URL="${{JARVIS_BROWSER_URL:-{page}}}"' in session
 
 
+def name_servers(bench):
+    """The name servers the pretend container asks: one of each kind, and a local stub's file it may also have."""
+    bench.sh("printf '%s\\n' 'search example.org' 'nameserver 192.0.2.53' 'nameserver 2001:db8::53%eth0' > /etc/resolv.conf "
+             "&& rm -f /run/systemd/resolve/resolv.conf")
+
+
 def test_install_sets_up_firewall_files_and_desktop(bench):
     bench.release("v0.1.0")
+    name_servers(bench)
     done = desktop(bench)
     assert done.returncode == 0, done.stdout
     for line in ("port 3001 is open to " + ALLOW + " and to nobody else", "sandbox layer 1, own namespaces: on",
@@ -65,8 +72,23 @@ def test_install_sets_up_firewall_files_and_desktop(bench):
     rules = bench.read("/etc/jarvis/desktop.nft")
     assert "type filter hook input priority filter; policy drop;" in rules
     assert "        ip saddr { 192.0.2.7, 198.51.100.0/24 } tcp dport 3001 counter accept\n" in rules
-    assert "        meta skuid 1000 fib daddr type local tcp dport { 3000, 3001, 8082 } counter reject with tcp reset\n" in rules
-    assert rules.count(" accept") == 7   # lo, established, icmp, DHCP, DHCPv6, the named addresses, and the output policy
+    assert "        meta skuid 1000 fib daddr type local tcp dport { 3000, 3001, 8082, 9222, 9223 } counter reject with tcp reset\n" in rules
+    # Jarvis's browser's user: answers to what it was asked (DevTools, for the door), the name servers, the internet.
+    assert rules.split("chain output {")[1].split("\n", 2)[2].startswith(
+        "        meta skuid 1000 fib daddr type local tcp dport { 3000, 3001, 8082, 9222, 9223 } counter reject with tcp reset\n"
+        "        meta skuid 1001 ct direction reply accept\n"
+        "        meta skuid 1001 ip daddr { 192.0.2.53 } meta l4proto { tcp, udp } th dport 53 accept\n"
+        "        meta skuid 1001 ip6 daddr { 2001:db8::53 } meta l4proto { tcp, udp } th dport 53 accept\n"
+        "        meta skuid 1001 fib daddr type local counter reject\n"
+        "        meta skuid 1001 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, "
+        "192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 } counter reject\n"
+        "        meta skuid 1001 meta nfproto ipv6 counter reject\n    }\n}\n"), rules
+    # lo, established, icmp, DHCP, DHCPv6, the named addresses, the output policy, and the browser's three
+    assert rules.count(" accept") == 10
+    assert bench.read("/etc/systemd/system/jarvis-browser.service").count("ExecStart=/usr/local/sbin/jarvis-browser-keeper\n") == 1
+    assert bench.sh("cmp /opt/jarvis/desktop/jarvis-browser-keeper.sh /usr/local/sbin/jarvis-browser-keeper && echo same").stdout == "same\n"
+    assert "jarvis-browser.service" in state(bench, "enabled").split()
+    assert "ok: Jarvis's browser runs as a user of its own (uid 1001) that reaches the internet only" in done.stdout
     assert state(bench, "nft-loaded") == rules and bench.sh("ls /etc/jarvis/desktop.nft.new").returncode != 0
     assert "jarvis-desktop-firewall.service" in state(bench, "enabled") and "docker" in state(bench, "enabled")
     unit = bench.read("/etc/systemd/system/jarvis-desktop-firewall.service")
@@ -82,6 +104,7 @@ def test_install_sets_up_firewall_files_and_desktop(bench):
                  '      SELKIES_COMMAND_ENABLED: "false"', '      DISABLE_SUDO: "true"',
                  f'      SELKIES_ALLOWED_ORIGINS: "{ORIGIN}"',
                  "      - /opt/jarvis-desktop/config:/config",
+                 "      - /opt/jarvis-desktop/browser:/jarvis-browser",
                  "      - /opt/jarvis-desktop/app:/opt/jarvis-desktop:ro",
                  "      - /opt/jarvis-desktop/app/chromium:/usr/bin/chromium:ro",
                  "      - /opt/jarvis-desktop/app/chromium:/usr/local/bin/wrapped-chromium:ro",
@@ -94,12 +117,12 @@ def test_install_sets_up_firewall_files_and_desktop(bench):
     assert "privileged" not in compose and "docker.sock" not in compose
     assert state(bench, "docker-running") == compose and state(bench, "docker-state") == "up\n"
 
-    files = bench.sh("cd /opt/jarvis-desktop && stat -c '%a %u:%g %n' app/* policies/* config").stdout.splitlines()
-    assert files == ["644 0:0 app/Oxanium-LICENSE.txt", "644 0:0 app/Oxanium.ttf", "644 0:0 app/brain.js", "755 0:0 app/bwrap",
+    files = bench.sh("cd /opt/jarvis-desktop && stat -c '%a %u:%g %n' app/* policies/* browser config").stdout.splitlines()
+    assert files == ["644 0:0 app/Oxanium-LICENSE.txt", "644 0:0 app/Oxanium.ttf", "644 0:0 app/brain.js", "644 0:0 app/browser-kept", "755 0:0 app/bwrap",
                      "755 0:0 app/chromium", "644 0:0 app/home.html", "644 0:0 app/icon.png",
                      "644 0:0 app/jarvis-session.desktop", "755 0:0 app/jarvis-session.sh", "644 0:0 app/panel.html",
                      "755 0:0 app/sandbox-check.sh", "755 0:0 app/session-check.sh", "644 0:0 policies/jarvis.json",
-                     "755 1000:1000 config"], files
+                     "700 1001:1001 browser", "755 1000:1000 config"], files
     # The pages are opened from disk and must bring everything they show: nothing is fetched from anywhere.
     for page in ("panel.html", "home.html"):
         text = bench.read(f"/opt/jarvis-desktop/app/{page}")
@@ -131,7 +154,7 @@ def test_the_docker_file_is_what_docker_will_read(bench):
     assert service["environment"] == {
         "PUID": "1000", "PGID": "1000", "TZ": service["environment"]["TZ"], "TITLE": "Jarvis", "START_DOCKER": "false",
         "SELKIES_COMMAND_ENABLED": "false", "DISABLE_SUDO": "true", "SELKIES_ALLOWED_ORIGINS": ORIGIN}
-    assert len(service["labels"]["jarvis.files"]) == 16 and len(service["volumes"]) == 8
+    assert len(service["labels"]["jarvis.files"]) == 16 and len(service["volumes"]) == 9
     assert set(service) == {"image", "container_name", "labels", "network_mode", "shm_size", "security_opt", "restart",
                             "environment", "volumes"}
 
@@ -171,6 +194,8 @@ def test_a_desktop_that_fails_its_checks_is_stopped_and_not_recorded(bench):
         ("other-uid", "", "the desktop's user is not user 1000"),
         ("pages-reach", "127.0.0.1/8082", "can connect to the desktop's own port 8082 (127.0.0.1): a web page could drive the desktop"),
         ("pages-reach", "::1/3001", "can connect to the desktop's own port 3001 (::1)"),
+        ("jail-reach", "127.0.0.1/3001", "Jarvis's browser's user can connect to 127.0.0.1 port 3001: it must reach the internet only"),
+        ("jail-reach", "127.0.0.1/9222", "Jarvis's browser's user can connect to 127.0.0.1 port 9222"),
         ("menu-no-sandbox", "", "a menu or autostart entry of the desktop starts a program with --no-sandbox"),
         ("running-no-sandbox", "", "a program in the desktop is running with --no-sandbox"),
     ):
@@ -181,6 +206,33 @@ def test_a_desktop_that_fails_its_checks_is_stopped_and_not_recorded(bench):
         assert state(bench, "docker-state") == "stopped\n" and bench.version() == "", flag
         (bench.state / flag).unlink()
     assert desktop(bench).returncode == 0 and bench.version() == "v0.1.0" and state(bench, "docker-state") == "up\n"
+
+
+def test_name_servers_that_changed_are_named_as_the_reason(bench):
+    bench.release("v0.1.0")
+    name_servers(bench)
+    assert desktop(bench).returncode == 0
+    bench.sh("sed -i 's/192.0.2.53/192.0.2.54/' /etc/resolv.conf")
+    looked = bench.sh(CHECK)
+    assert looked.returncode == 1 and "this container's name servers changed since the firewall was written" in looked.stdout
+    assert "desktop.nft is not what the settings ask for" not in looked.stdout
+    bench.sh("echo '# changed' >> /etc/jarvis/desktop.nft")
+    assert "desktop.nft is not what the settings ask for" in bench.sh(CHECK).stdout
+    assert desktop(bench).returncode == 0 and "192.0.2.54" in bench.read("/etc/jarvis/desktop.nft")
+
+
+def test_a_browser_that_does_not_run_is_said_and_its_keeper_is_looked_at(bench):
+    bench.release("v0.1.0")
+    (bench.state / "no-browser").write_text("")
+    done = desktop(bench)
+    assert done.returncode == 0 and "WARNING: Jarvis's browser is not running on the desktop yet" in done.stdout, done.stdout
+    (bench.state / "no-browser").unlink()
+    (bench.state / "keeper-running").unlink()
+    looked = bench.sh(CHECK)
+    assert looked.returncode == 1 and "the keeper of Jarvis's browser (jarvis-browser) is not running" in looked.stdout
+    bench.sh("chmod 755 /opt/jarvis-desktop/browser")
+    assert "/opt/jarvis-desktop/browser is not Jarvis's browser's own folder (1001:1001 700)" in bench.sh(CHECK).stdout
+    assert desktop(bench).returncode == 0 and bench.sh(CHECK).returncode == 0
 
 
 def test_the_desktop_behind_the_web_server_is_given_time_to_start(bench):

@@ -24,13 +24,15 @@ _CAN = (
     (("notes_",), "search and read your notes"),
     (("note_add", "note_replace"), "add lines to a note (note_add) and replace one passage in a note (note_replace)"),
     (("desktop_",), "open, close, move and arrange the windows on the owner's desktop"),
+    (("browser_",), "see which tabs are open in the web browser on the owner's desktop, open a web page there "
+                    "(browser_open) and read the text of a page that is open (browser_read)"),
 )
 # (tools that would give the ability, what you cannot do while none of them is there)
 _CANNOT = (
     ((), "change anything in the lab: you cannot start, stop, restart, update, fix, silence or ignore anything there"),
     (("desktop_",), "open, close or move a window, or see the owner's screen"),
     (("note_add", "note_replace"), "write to or change a note, or keep anything in mind for a later conversation"),
-    (("web_",), "look anything up on the internet"),
+    (("web_", "browser_"), "look anything up on the internet"),
     ((), "send email or messages to anyone"),
     ((), "change how you behave by deciding or promising to: that takes a change the owner approves"),
 )
@@ -51,6 +53,8 @@ def describe(tools: Iterable[str], model: str = "", where: str | None = None, su
     cannot = [what for wanted, what in _CANNOT if not wanted or not _has(names, wanted)]
     if _has(names, ("desktop_",)):
         cannot.append("scroll, type, click or select inside a window: with windows you can only open, close, move and arrange them")
+    if _has(names, ("browser_",)):
+        cannot.append("click, type, scroll or sign in on a web page, or open the brain, the lab or the desktop itself in the browser")
     if _has(names, ("note_add", "note_replace")):
         cannot.append("edit a note in any other way than note_add and note_replace: you cannot rewrite, rename, create or delete one")
     lasts = "your notes and an audit log of your turns and tool calls" if _has(names, ("notes_",)) else "an audit log of your turns and tool calls"

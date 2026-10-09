@@ -1,0 +1,2 @@
+Jarvis's browser on this desktop runs as a user of its own and is kept open from outside the desktop
+(jarvis-browser-keeper.sh); the session script only puts its window in place. See install/jarvis-desktop-install.sh.

@@ -17,6 +17,8 @@ from .adapters.pbs import PbsClient, make_pbs_tools
 from .adapters.proxmox import ProxmoxClient, make_proxmox_tools
 from .adapters.switch import SwitchSession, make_switch_tool
 from .audit import AuditLog
+from .browser.door import Door
+from .browser.tools import Browser, make_browser_tools
 from .config import Settings
 from .llm import OllamaBackend
 from .notes.repo import BrainRepo, is_ssh_remote
@@ -59,11 +61,13 @@ class Jarvis:
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(10, read=None))
         self.audit = AuditLog(settings.audit_path)
         self.vault = Vault(settings.env_dir, settings.secrets_mode, settings.identity, settings.sops,
-                           watch=tuple(settings.trust_dir / trust for *_, trust in SYSTEMS if trust))
+                           watch=tuple(settings.trust_dir / trust for *_, trust in SYSTEMS if trust)
+                           + settings.door_files)
         # Nothing a tool returns may carry a value of the vault on to the model.
         self.tools = ToolRegistry(self.audit, redact=lambda text: self.vault.mask(text))
         self.tools.register(make_local_status(settings.ollama_url, self.client))
         self.lab: dict[str, str] = {}    # system: why it has no tools ("" when it has them)
+        self.browser = ""                # why Jarvis has no browser tools ("" when it has them, None when no desktop is set up)
         self._lab_http: list[httpx.AsyncClient] = []
         self._closing: list[httpx.AsyncClient] = []
         self.notes: BrainRepo | None = None
@@ -109,6 +113,7 @@ class Jarvis:
             if why is not None:
                 lab[system[0]] = why
         self.lab = lab
+        self.browser = self._browser()
         record: dict[str, Any] = {"status": self.vault.status, "files": self.vault.files, "values": len(self.vault.names()),
                                   "tools": [name for name in self.tools.names() if name != "local_status"]}
         if self.vault.status != UNLOCKED:
@@ -158,6 +163,20 @@ class Jarvis:
         if client is not None:
             self._lab_http.append(client._http)
         for tool in tools:
+            self.tools.register(tool)
+        return ""
+
+    def _browser(self) -> str | None:
+        """Gives Jarvis the browser on the owner's desktop when its door is set up. It needs nothing from the vault:
+        the brain's own certificate opens the door. None when no desktop has handed its door over."""
+        self.tools.remove("browser_")
+        door = Door(*self.settings.door_files)
+        if not door.set_up():
+            return None
+        why = door.ready()
+        if why:
+            return why
+        for tool in make_browser_tools(Browser(door)):
             self.tools.register(tool)
         return ""
 

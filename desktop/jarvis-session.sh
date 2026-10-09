@@ -13,6 +13,9 @@ PANEL_URL="${JARVIS_PANEL_URL:-file:///opt/jarvis-desktop/panel.html}"
 BROWSER_URL="${JARVIS_BROWSER_URL:-file:///opt/jarvis-desktop/home.html}"
 CHROMIUM="${JARVIS_CHROMIUM:-/opt/jarvis-desktop/chromium}"
 STATE="${JARVIS_SESSION_DIR:-$HOME/.config/jarvis}"
+# On the installed desktop Jarvis's browser runs as a user of its own and is started from outside, by the
+# desktop's container (jarvis-browser-keeper.sh); this script then only puts its window in place.
+BROWSER_KEPT="${JARVIS_BROWSER_KEPT:-/opt/jarvis-desktop/browser-kept}"
 PAUSE="${JARVIS_SESSION_PAUSE:-2}"
 
 mkdir -p "$STATE"
@@ -243,7 +246,7 @@ while true; do
         panel_starts=$((panel_starts + 1))
         [ "$panel_starts" -lt 5 ] || echo "jarvis-session: the panel was started five times and no window of it showed; not trying again" >&2
     fi
-    if [ -z "$browser" ] && due browser "$browser_started" "$browser_starts"; then
+    if [ -z "$browser" ] && [ ! -e "$BROWSER_KEPT" ] && due browser "$browser_started" "$browser_starts"; then
         start_browser
         browser_started=$SECONDS
         browser_starts=$((browser_starts + 1))

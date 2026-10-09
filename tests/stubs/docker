@@ -10,6 +10,8 @@
 #   no-bwrap              the image's bwrap is not ours
 #   session               the exit status the session check ends with (default 0)
 #   pages-reach           holds ADDRESS/PORT: a program of the desktop's user can connect there
+#   jail-reach            holds ADDRESS/PORT: a program of Jarvis's browser's user (1001) can connect there
+#   no-browser            Jarvis's browser is not running
 set -euo pipefail
 state="$STUB_STATE"
 printf 'docker %s\n' "$*" >> "$state/calls"
@@ -45,7 +47,11 @@ case "$1" in
         ;;
     exec)  # exec -u abc -e ... NAME COMMAND ...
         [ "$(cat "$state/docker-state" 2>/dev/null)" = "up" ] || { echo "container is not running" >&2; exit 1; }
-        while [ "$1" != "jarvis-desktop" ]; do shift; done
+        user=root
+        while [ "$1" != "jarvis-desktop" ]; do
+            [ "$1" != "-u" ] || user="$2"
+            shift
+        done
         shift
         case "$1" in
             /opt/jarvis-desktop/sandbox-check.sh)
@@ -79,9 +85,12 @@ case "$1" in
                 ;;
             grep) [ -f "$state/menu-no-sandbox" ] ;;
             id) if [ -f "$state/other-uid" ]; then echo 911; else echo 1000; fi ;;
-            bash)  # a connection tried from inside, as the desktop's user: refused unless the test says otherwise
+            pgrep) [ "$*" = "pgrep -u 1001 -f -- --class=jarvis-browser" ] && [ ! -f "$state/no-browser" ] ;;
+            bash)  # a connection tried from inside, as the desktop's user or the browser's: refused unless the test says otherwise
+                knob=pages-reach
+                [ "$user" != "1001:1001" ] || knob=jail-reach
                 case "$3" in
-                    "exec 3<>/dev/tcp/"*) [ -f "$state/pages-reach" ] && [[ "$3" == *"$(cat "$state/pages-reach")" ]] ;;
+                    "exec 3<>/dev/tcp/"*) [ -f "$state/$knob" ] && [[ "$3" == *"$(cat "$state/$knob")" ]] ;;
                     *) exit 64 ;;
                 esac
                 ;;

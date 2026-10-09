@@ -360,6 +360,22 @@ tls_faults() {
         || echo "the service's key does not belong to its certificate"
     [ "$(stat -c '%U:%G %a' "$TLS/server.key")" = "root:jarvis 640" ] || echo "$TLS/server.key must belong to root, group jarvis, mode 0640"
     [ ! -e "$TLS/ca.key" ] || [ "$(stat -c '%U:%G %a' "$TLS/ca.key")" = "root:root 600" ] || echo "$TLS/ca.key must belong to root alone, mode 0600"
+    door_faults
+}
+
+# The brain's key for the door to the browser on its desktop: a client certificate from this brain's own
+# authority, for client use only. It never leaves the brain; the desktop's door takes it because the desktop
+# trusts this authority already (for the panel). Prints what is wrong, one line each.
+door_faults() {
+    local file
+    for file in door-client.pem door-client.key; do
+        [ -s "$TLS/$file" ] || { echo "$TLS/$file is missing"; return 0; }
+    done
+    openssl verify -CAfile "$TLS/ca.pem" -purpose sslclient "$TLS/door-client.pem" >/dev/null 2>&1 \
+        || echo "the door certificate is not signed by this brain's own authority for client use, or is out of date"
+    [ "$(openssl x509 -in "$TLS/door-client.pem" -noout -pubkey 2>/dev/null)" = "$(openssl pkey -in "$TLS/door-client.key" -pubout 2>/dev/null)" ] \
+        || echo "the door key does not belong to its certificate"
+    [ "$(stat -c '%U:%G %a' "$TLS/door-client.key")" = "root:jarvis 640" ] || echo "$TLS/door-client.key must belong to root, group jarvis, mode 0640"
 }
 
 new_key_and() {  # new_key_and NAME DAYS SUBJECT [openssl req options]: a new key NAME.key.new and certificate NAME.pem.new
@@ -386,7 +402,7 @@ apply_tls() {
             -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign"
         mv -f "$TLS/ca.key.new" "$TLS/ca.key"
         mv -f "$TLS/ca.pem.new" "$TLS/ca.pem"
-        rm -f "${TLS:?}/server.pem" "${TLS:?}/server.key"
+        rm -f "${TLS:?}/server.pem" "${TLS:?}/server.key" "${TLS:?}/door-client.pem" "${TLS:?}/door-client.key"
     fi
     chown root:root "$TLS/ca.key" "$TLS/ca.pem"
     chmod 0600 "$TLS/ca.key"
@@ -407,6 +423,20 @@ apply_tls() {
     chmod 0640 "$TLS/server.key"
     chown root:root "$TLS/server.pem"
     chmod 0644 "$TLS/server.pem"
+    if [ -n "$(door_faults 2>/dev/null | grep -v 'must belong to' || true)" ] \
+        || ! openssl x509 -in "$TLS/door-client.pem" -noout -checkend $((60 * 86400)) >/dev/null 2>&1; then
+        new_key_and door-client 825 "/CN=Jarvis brain door" -CA "$TLS/ca.pem" -CAkey "$TLS/ca.key" \
+            -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=clientAuth"
+        chown root:jarvis "$TLS/door-client.key.new"
+        chmod 0640 "$TLS/door-client.key.new"
+        mv -f "$TLS/door-client.key.new" "$TLS/door-client.key"
+        mv -f "$TLS/door-client.pem.new" "$TLS/door-client.pem"
+    fi
+    chown root:jarvis "$TLS/door-client.key"
+    chmod 0640 "$TLS/door-client.key"
+    chown root:root "$TLS/door-client.pem"
+    chmod 0644 "$TLS/door-client.pem"
     [ "$new_authority" = "0" ] || warn "this brain has a new certificate authority. Run the desktop's installer again (with var_brain) so that the desktop trusts this brain again."
 }
 

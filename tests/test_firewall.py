@@ -57,12 +57,15 @@ def network():
                         f"ip -n {desk} route add 198.51.100.0/24 dev vd",
                         f"ip -n {world} addr add 192.0.2.7/24 dev vw", f"ip -n {world} addr add 192.0.2.8/24 dev vw",
                         f"ip -n {world} addr add 198.51.100.9/24 dev vw", f"ip -n {world} addr add 203.0.113.5/24 dev vw",
+                        f"ip -n {world} addr add 198.18.0.9/24 dev vw", f"ip -n {desk} route add 198.18.0.0/24 dev vd",
                         f"ip -n {world} link set vw up", f"ip -n {world} link set lo up",
                         f"ip -n {desk} route add 203.0.113.0/24 dev vd"):
             sh(*command.split())
+        for command in (f"ip -n {desk} addr add 2001:db8::1/64 dev vd nodad", f"ip -n {world} addr add 2001:db8::7/64 dev vw nodad"):
+            sh(*command.split(), check=False)   # a machine without IPv6: that leg is then not tested
         if sh("ip", "netns", "exec", desk, "nft", "list", "tables", check=False).returncode != 0:
             pytest.skip("nft cannot talk to the kernel here")
-        for ns, ports in ((desk, ("3000", "3001", "8082", "8443", "22")), (world, ("8080",))):
+        for ns, ports in ((desk, ("3000", "3001", "8082", "8443", "22", "9222", "9223")), (world, ("8080", "53"))):
             server = subprocess.Popen(["ip", "netns", "exec", ns, sys.executable, "-c", SERVER, *ports], env={"PATH": REAL},
                                       stdout=subprocess.PIPE, text=True)
             assert server.stdout.readline().strip() == "ready"
@@ -163,6 +166,69 @@ def test_a_page_in_the_desktops_browser_cannot_reach_the_desktops_own_ports(benc
     assert reach("192.0.2.7", 3001)                                      # while the named proxy still gets in
     counted = sh("ip", "netns", "exec", desk, "nft", "list", "table", "inet", "jarvis_desktop").stdout
     assert re.search(r"meta skuid 1000 .* counter packets [1-9]", counted), counted
+
+
+def test_jarviss_browser_reaches_the_internet_and_the_name_servers_and_nothing_private(bench, network, tmp_path):
+    """Jarvis's browser runs as user 1001. Here 192.0.2.7 stands for the internet, and 198.18.0.9 (a range kept
+    from the browser) for the lab, whose machine is also the name server."""
+    desk, world, reach = network
+    if not shutil.which("setpriv", path=REAL):
+        pytest.skip("needs setpriv")
+    bench.release("v0.1.0")
+    bench.sh("printf '%s\\n' 'nameserver 198.18.0.9' > /etc/resolv.conf && rm -f /run/systemd/resolve/resolv.conf")
+    done = bench.install("desktop", bench.answers("desktop", desktop_allow="192.0.2.7"))
+    assert done.returncode == 0, done.stdout
+    rules = tmp_path / "desktop.nft"
+    rules.write_text(bench.read("/etc/jarvis/desktop.nft"))
+    assert reach.local(1001, "198.18.0.9", 8080) and reach.local(1001, "127.0.0.1", 3001)   # before the rules
+    six = reach.local(1001, "2001:db8::7", 8080)
+    sh("ip", "netns", "exec", desk, "nft", "-f", rules)
+
+    assert reach.local(1001, "192.0.2.7", 8080)                  # the internet
+    assert reach.local(1001, "198.18.0.9", 53)                   # the name server, for names only
+    assert not reach.local(1001, "198.18.0.9", 8080)             # the lab
+    for target, port in (("127.0.0.1", 3001), ("127.0.0.1", 9222), ("192.0.2.1", 22), ("192.0.2.1", 8443)):
+        assert not reach.local(1001, target, port), (target, port)   # the desktop's container itself
+    assert reach.local(1000, "198.18.0.9", 8080), "the desktop's own user is not limited this way"
+    if six:   # no IPv6 at all for that user, whatever the address: a lab's machines have global ones too
+        assert not reach.local(1001, "2001:db8::7", 8080) and reach.local(1000, "2001:db8::7", 8080)
+    # DevTools listens as that user; its answers to the door (another user, on loopback) go out.
+    listener = subprocess.Popen(["ip", "netns", "exec", desk, "setpriv", "--reuid", "1001", "--regid", "1001", "--clear-groups",
+                                 sys.executable, "-c", SERVER, "9333"], env={"PATH": REAL}, stdout=subprocess.PIPE, text=True)
+    try:
+        assert listener.stdout.readline().strip() == "ready"
+        assert reach.local(999, "127.0.0.1", 9333)
+    finally:
+        listener.kill()
+
+
+def test_only_the_brain_reaches_the_browsers_door_and_no_page_reaches_the_browsers_devtools(bench, network, tmp_path):
+    """DevTools gives whoever reaches it the whole browser. From outside only the brain's address gets to the door
+    (9223), and nobody to DevTools itself (9222); from inside, the desktop's user (every page) gets to neither,
+    while the door's own user reaches DevTools on loopback."""
+    from test_service_install import a_brain
+    desk, world, reach = network
+    if not shutil.which("setpriv", path=REAL):
+        pytest.skip("needs setpriv")
+    bench.release("v0.1.0")
+    a_brain(bench, address="192.0.2.8")
+    done = bench.install("desktop", bench.answers("desktop", desktop_allow="192.0.2.7", brain="190"))
+    assert done.returncode == 0, done.stdout
+    rules = tmp_path / "desktop.nft"
+    rules.write_text(bench.read("/etc/jarvis/desktop.nft"))
+    assert reach("192.0.2.7", 9223) and reach("192.0.2.8", 9222)   # before the rules, everybody
+    sh("ip", "netns", "exec", desk, "nft", "-f", rules)
+
+    assert reach("192.0.2.8", 9223)                  # the brain, to the door
+    for source in ("192.0.2.7", "198.51.100.9", "203.0.113.5"):
+        assert not reach(source, 9223), source        # the proxy and everybody else: no
+    for source in ("192.0.2.7", "192.0.2.8"):
+        assert not reach(source, 9222), source        # DevTools itself: nobody from outside
+        assert not reach("192.0.2.8", 3001) and reach("192.0.2.7", 3001)
+    for target in ("127.0.0.1", "192.0.2.1"):
+        for port in (9222, 9223):
+            assert not reach.local(1000, target, port), (target, port)   # a page in the desktop's browser: no
+    assert reach.local(999, "127.0.0.1", 9222)        # the door's user: yes
 
 
 def test_only_the_named_addresses_reach_jarviss_port_and_nothing_else_about_the_brain_changes(bench, network, tmp_path):

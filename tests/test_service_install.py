@@ -33,7 +33,13 @@ def test_install_makes_the_certificates_the_rule_and_the_unit_and_starts_jarvis(
     # An authority of its own whose key only root reads, and a certificate for this address and nothing else.
     assert bench.sh(f"stat -c '%U:%G %a %n' {TLS} {TLS}/*").stdout.splitlines() == [
         f"root:jarvis 750 {TLS}", f"root:root 600 {TLS}/ca.key", f"root:root 644 {TLS}/ca.pem",
+        f"root:jarvis 640 {TLS}/door-client.key", f"root:root 644 {TLS}/door-client.pem",
         f"root:jarvis 640 {TLS}/server.key", f"root:root 644 {TLS}/server.pem"]
+    # The key to the desktop's browser door: from the same authority, for client use and nothing else.
+    assert bench.sh(f"openssl verify -CAfile {TLS}/ca.pem -purpose sslclient {TLS}/door-client.pem").stdout == f"{TLS}/door-client.pem: OK\n"
+    assert bench.sh(f"openssl verify -CAfile {TLS}/ca.pem -purpose sslserver {TLS}/door-client.pem").returncode != 0
+    door = bench.sh(f"openssl x509 -in {TLS}/door-client.pem -noout -text").stdout
+    assert "TLS Web Client Authentication" in door and "TLS Web Server Authentication" not in door and "CA:FALSE" in door
     assert bench.sh(f"openssl verify -CAfile {TLS}/ca.pem {TLS}/server.pem").stdout == f"{TLS}/server.pem: OK\n"
     text = bench.sh(f"openssl x509 -in {TLS}/server.pem -noout -text").stdout
     assert f"IP Address:{ADDRESS}\n" in text and "DNS:" not in text and "CA:FALSE" in text and "TLS Web Server Authentication" in text
@@ -136,6 +142,9 @@ def test_certificates_are_renewed_in_time_and_what_is_wrong_with_them_is_noticed
         (f"openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out {TLS}/server.key 2>/dev/null && chown root:jarvis "
          f"{TLS}/server.key && chmod 640 {TLS}/server.key", "the service's key does not belong to its certificate"),
         (f"rm {TLS}/server.pem", f"{TLS}/server.pem is missing"),
+        (f"chmod 644 {TLS}/door-client.key", f"{TLS}/door-client.key must belong to root, group jarvis, mode 0640"),
+        (f"cp {TLS}/server.pem {TLS}/door-client.pem", "the door certificate is not signed by this brain's own authority for client use"),
+        (f"rm {TLS}/door-client.key", f"{TLS}/door-client.key is missing"),
         ("echo '# changed' >> /etc/systemd/system/jarvis.service", "/etc/systemd/system/jarvis.service is not the one of this release"),
         ("echo '# changed' >> /etc/jarvis/brain.nft", "/etc/jarvis/brain.nft is not what the settings ask for"),
         (f"rm {bench.state}/nft-loaded-brain", "the firewall table jarvis_brain is not loaded"),
@@ -222,6 +231,7 @@ def a_brain(bench, ctid=190, address="192.0.2.20", role="brain"):
     """Another container on the node: a brain as the desktop's installer finds it. Returns its authority's text."""
     files = bench.state / f"files-{ctid}" / "etc" / "jarvis"
     (files / "tls").mkdir(parents=True, exist_ok=True)
+    (files / "trust").mkdir(parents=True, exist_ok=True)
     (bench.state / f"ct-{ctid}").write_text("description: a brain\n")
     (bench.state / f"run-{ctid}").write_text("running\n")
     lines = [f"JARVIS_ROLE={role}"] + ([f"JARVIS_ADDRESS={address}"] if address else [])
@@ -248,6 +258,27 @@ def test_a_desktop_is_told_where_its_brain_is_and_trusts_it_for_that_address_onl
     assert "JARVIS_BRAIN_URL=https://192.0.2.20:8443\n" in bench.read("/etc/jarvis/site.env")
     assert bench.read("/etc/jarvis/brain-ca.pem") == authority
     assert not any("pct exec 190" in call and " cat " not in call for call in bench.calls("pct")), "the brain was only read from"
+    # ...and given the desktop's door, into its folder of what it trusts, and nothing else.
+    pushes = [c for c in bench.calls("pct") if c.startswith("pct push 190 ")]
+    assert len(pushes) == 2 and pushes[0].endswith(" /etc/jarvis/trust/desktop-door.pem --perms 0644"), pushes
+    assert pushes[1].endswith(" /etc/jarvis/trust/desktop-door.addr --perms 0644"), pushes
+    trust = bench.state / "files-190" / "etc" / "jarvis" / "trust"
+    door = bench.read("/etc/jarvis/door/door.pem")
+    assert (trust / "desktop-door.pem").read_text() == door and (trust / "desktop-door.addr").read_text() == f"{ADDRESS}:9223\n"
+    assert f"the brain in container 190 may drive Jarvis's browser here, through the door at {ADDRESS}:9223" in done.stdout
+    seen = subprocess.run(["openssl", "x509", "-noout", "-ext", "subjectAltName,extendedKeyUsage", "-enddate"], input=door,
+                          capture_output=True, text=True, check=True).stdout
+    assert "DNS:jarvis-door.invalid" in seen and "TLS Web Server Authentication" in seen
+    assert bench.sh("stat -c '%U:%G %a' /etc/jarvis/door/door.key").stdout == "root:jarvis-door 640\n"
+    assert "BEGIN" in bench.read("/etc/jarvis/door/door.key") and "PRIVATE" not in (trust / "desktop-door.pem").read_text()
+    unit = bench.read("/etc/systemd/system/jarvis-door.service")
+    assert ("ExecStart=/usr/bin/socat OPENSSL-LISTEN:9223,reuseaddr,fork,cert=/etc/jarvis/door/door.pem,key=/etc/jarvis/door/door.key,"
+            "cafile=/etc/jarvis/brain-ca.pem,verify=1,openssl-min-proto-version=TLS1.3 EXEC:/usr/local/sbin/jarvis-door-forward\n") in unit
+    assert bench.sh("cmp /opt/jarvis/desktop/jarvis-door-forward.sh /usr/local/sbin/jarvis-door-forward && echo same").stdout == "same\n"
+    assert "User=jarvis-door\n" in unit and "NoNewPrivileges=yes\n" in unit
+    assert "jarvis-door.service" in state(bench, "enabled").split() and (bench.state / "door-running").exists()
+    assert "        ip saddr 192.0.2.20 tcp dport 9223 counter accept\n" in bench.read("/etc/jarvis/desktop.nft")
+    assert "WARNING: the door has a new certificate" not in done.stdout, "a first certificate is handed over in the same run"
 
     # The browser's rules: this release's, plus the brain's authority for the brain's address and no other.
     policy = json.loads(bench.read("/opt/jarvis-desktop/policies/jarvis.json"))
@@ -265,6 +296,7 @@ def test_a_desktop_is_told_where_its_brain_is_and_trusts_it_for_that_address_onl
     label = json.loads(json.dumps(state(bench, "docker-running"))).split('jarvis.files: "')[1][:16]
     again = bench.install("desktop", bench.answers("desktop"))
     assert again.returncode == 0 and "JARVIS_BRAIN_URL=https://192.0.2.20:8443\n" in bench.read("/etc/jarvis/site.env")
+    assert bench.read("/etc/jarvis/door/door.pem") == door, "the door keeps its certificate, which the brain pins"
     assert state(bench, "docker-running").split('jarvis.files: "')[1][:16] == label
     # The brain made a new authority: named again, the desktop takes the new one and is made anew.
     renewed = a_brain(bench)
@@ -279,6 +311,32 @@ def test_a_desktop_is_told_where_its_brain_is_and_trusts_it_for_that_address_onl
     assert json.loads(bench.read("/opt/jarvis-desktop/policies/jarvis.json")) == release
     assert bench.read("/opt/jarvis-desktop/app/brain.js").splitlines()[-1] == 'window.JARVIS_BRAIN = "";'
     assert "this desktop has no brain yet" in unlinked.stdout and bench.sh(DESKTOP_CHECK).returncode == 0
+    assert bench.sh("test -e /etc/systemd/system/jarvis-door.service").returncode != 0 and not (bench.state / "door-running").exists()
+    assert "9223" not in bench.read("/etc/jarvis/desktop.nft").split("chain output")[0]
+
+
+def test_the_door_is_looked_at_and_a_broken_one_is_made_anew(bench):
+    bench.release("v0.1.0")
+    a_brain(bench)
+    assert bench.install("desktop", bench.answers("desktop", brain="190")).returncode == 0
+    door = bench.read("/etc/jarvis/door/door.pem")
+    bench.sh("chmod 0644 /etc/jarvis/door/door.key")
+    looked = bench.sh(DESKTOP_CHECK)
+    assert looked.returncode == 1 and "the door's key (/etc/jarvis/door/door.key) is not root:jarvis-door 640" in looked.stdout
+    script = "bash /opt/jarvis/install/jarvis-desktop-install.sh"
+    fixed = bench.sh(script)
+    assert fixed.returncode == 0 and bench.read("/etc/jarvis/door/door.pem") == door, "a wrong owner is put right, the key kept"
+    (bench.state / "door-running").unlink()
+    assert "the door to Jarvis's browser (jarvis-door) is not running" in bench.sh(DESKTOP_CHECK).stdout
+    bench.sh("rm /etc/jarvis/door/door.key")
+    assert "the door's certificate or key is missing" in bench.sh(DESKTOP_CHECK).stdout
+    made = bench.sh(script)
+    assert made.returncode == 0 and bench.read("/etc/jarvis/door/door.pem") != door
+    assert "WARNING: the door has a new certificate: run the desktop's installer on the Proxmox node again (var_brain)" in made.stdout
+    assert bench.sh(DESKTOP_CHECK).returncode == 0
+    # The installer on the node hands the new one over.
+    again = bench.install("desktop", bench.answers("desktop", brain="190"))
+    assert again.returncode == 0 and (bench.state / "files-190/etc/jarvis/trust/desktop-door.pem").read_text() == bench.read("/etc/jarvis/door/door.pem")
 
 
 def test_a_brain_that_is_away_or_does_not_let_the_desktop_in_is_said_and_is_no_fault(bench):

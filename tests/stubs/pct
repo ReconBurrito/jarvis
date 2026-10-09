@@ -44,6 +44,11 @@ case "$cmd" in
             if [ "$1" = "--perms" ]; then perms="$2"; fi
             shift
         done
+        # Into another container than the one under test: its files, and only where its folder is already there.
+        if [ -d "$state/files-$id" ]; then
+            [ -d "$state/files-$id$(dirname "$target")" ] || { echo "pct stub: no folder for $target in container $id" >&2; exit 2; }
+            target="$state/files-$id$target"
+        fi
         install -m "$perms" "$source_file" "$target"
         ;;
     exec)

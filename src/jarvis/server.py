@@ -231,7 +231,8 @@ class Panel:
             "waiting": [],   # changes that wait for the owner's yes or no; nothing can ask for one yet
             "pulse": pulse,
             "vault": {"status": self.jarvis.vault.status, "detail": self.jarvis.vault.detail},
-            "lab": {system: why or "ready" for system, why in self.jarvis.lab.items()},
+            "lab": {system: why or "ready" for system, why in self.jarvis.lab.items()}
+                   | ({} if self.jarvis.browser is None else {"browser": self.jarvis.browser or "ready"}),
         }
 
     async def turn(self, text: str) -> AsyncIterator[str]:

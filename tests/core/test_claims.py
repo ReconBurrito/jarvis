@@ -177,3 +177,34 @@ def test_the_local_model_is_told_what_it_is(audit):
     system = fake.requests[0]["messages"][0]["content"]
     assert "What you are and how you work:" in system and "You are a program called Jarvis" in system and "local_status" not in system
     assert system.startswith("You are Jarvis, the assistant of this home lab") and "read the state of the machine you run on" in system
+
+
+def test_opening_a_page_is_backed_by_browser_open_and_working_inside_one_never_is():
+    made = Claims(["browser_open", "browser_read", "browser_tabs"])
+    assert made.unbacked("I opened the page on example.com.") == "browse"
+    assert made.unbacked("I signed in to the site.") == "form"
+    made.tool("browser_open", {"error": "localhost is not an address on the internet"})
+    assert made.unbacked("I opened the page on example.com.") == "browse", "a refused open backs nothing"
+    made.tool("browser_open", {"done": True, "tab": "T1", "title": "Example"})
+    assert made.unbacked("I opened the page on example.com.") is None
+    assert made.unbacked("I signed in to the site.") == "form", "browser_open does not sign in"
+    assert made.unbacked("I filled in the form on the page.") == "form"
+    assert made.unbacked("I clicked the sign-in button on the page.") in ("hands", "form"), "nor click"
+    assert "browser_open opens a page and browser_read reads it" in made.note("form", "I clicked it.")
+    assert "call browser_open with its address" in made.note("browse", "I opened it.")
+    read = Claims(["browser_read"])
+    read.tool("browser_read", {"done": True, "tab": "T1", "text": "Hello"})
+    assert read.unbacked("I looked up the page you have open in the browser.") is None
+
+
+def test_a_hint_never_names_a_browser_tool_that_is_not_there():
+    bare = Claims(["local_status"])
+    for kind in ("browse", "form"):
+        assert "browser_" not in bare.note(kind, "I did it."), kind
+
+
+def test_jarvis_is_told_what_the_browser_tools_can_and_cannot_do():
+    said = describe(["local_status", "browser_open", "browser_read", "browser_tabs"])
+    assert "open a web page there (browser_open)" in said and "click, type, scroll or sign in on a web page" in said
+    assert "look anything up on the internet" not in said.split("What you cannot do:")[1]
+    assert "look anything up on the internet" in describe(["local_status"])

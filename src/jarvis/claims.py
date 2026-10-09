@@ -29,6 +29,8 @@ _LAB_THING = (r"(?:it|them|that|this|pve\w*|node|nodes|guest|guests|vm|vms|conta
               r"vm\s*\d+|service|services|alert|alerts|error|errors|warning|warnings|task|tasks|backup|backups|"
               r"firewall|switch|port|ports|pihole[\w-]*|dns|server|servers|repository|update|updates|check|checks|"
               r"opnsense|proxmox|cluster|datastore|[a-z]+\d+)")
+_WEB = (r"web ?pages?|pages?|sites?|websites?|urls?|links?|search (?:bar|box|field|results)|browser|tabs?|forms?|buttons?|"
+        r"fields?|https?://|google|youtube|[a-z0-9-]+\.(?:com|org|net|io|dev|gov|edu|co|uk)")
 _AFTER = r"(?![^.;:!?]*\b(?:by(?! side)|since|ago|yesterday|earlier today|last (?:week|night|month))\b)"  # not someone else's, not history
 
 _CLAIMS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -59,14 +61,17 @@ _CLAIMS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"|\b{_THE}{_WINDOW}\s+(?:has|have)\s+(?:now\s+|just\s+)?been\s+(?:closed|opened|moved|minimi[sz]ed|"
         rf"maximi[sz]ed|restored|tiled|cascaded|arranged)\b{_AFTER}|\b{_THE}{_WINDOW}\s+(?:is|are)\s+now\s+(?:closed|"
         rf"minimi[sz]ed|maximi[sz]ed|tiled|side by side)\b")),
+    # Going to a page, which browser_open does, apart from working inside one, which none of Jarvis's own tools do.
     ("browse", re.compile(
-        rf"{_I} (?:opened|visited|loaded|went to|navigated(?: to)?|browsed(?: to)?|searched(?: for)?|looked up|logged (?:in|into)|"
-        rf"signed (?:in|into)|clicked|typed|entered|filled in|submitted|scrolled)\b[^.!?]{{0,80}}\b(?:web ?pages?|pages?|"
-        rf"sites?|websites?|urls?|links?|search (?:bar|box|field|results)|browser|tabs?|forms?|buttons?|fields?|https?://|"
-        rf"google|youtube|[a-z0-9-]+\.(?:com|org|net|io|dev|gov|edu|co|uk))\b"
-        rf"|\band (?:then )?(?:typed|clicked|entered|submitted|searched for|pressed enter)\b"
-        rf"|{_I} (?:adjusted|set|turned|changed|raised|lowered|maxed|muted|unmuted|paused|played|started|stopped)\b[^.!?]{{0,40}}\b(?:volume|sound|audio|video|playback)\b"
+        rf"{_I} (?:opened|visited|loaded|went to|navigated(?: to)?|browsed(?: to)?|searched(?: for)?|looked up)\b[^.!?]{{0,80}}"
+        rf"\b(?:{_WEB})\b"
+        rf"|\band (?:then )?searched for\b"
         rf"|\bthe browser (?:is|was) now (?:loading|showing|on|open)\b|\b(?:the )?(?:page|site|tab) is now (?:loading|open|showing)\b")),
+    ("form", re.compile(
+        rf"{_I} (?:logged (?:in|into)|signed (?:in|into)|clicked|typed|entered|filled in|submitted|scrolled)\b[^.!?]{{0,80}}"
+        rf"\b(?:{_WEB})\b"
+        rf"|\band (?:then )?(?:typed|clicked|entered|submitted|pressed enter)\b"
+        rf"|{_I} (?:adjusted|set|turned|changed|raised|lowered|maxed|muted|unmuted|paused|played|started|stopped)\b[^.!?]{{0,40}}\b(?:volume|sound|audio|video|playback)\b")),
     ("lab", re.compile(
         rf"{_I} (?:restarted|rebooted|silenced|suppressed|ignored|muted|upgraded|updated|shut down|turned off|"
         rf"switched off|acknowledged|fixed|repaired|disabled|applied)\s+{_THE}{_LAB_THING}\b"
@@ -87,7 +92,8 @@ _BACKED_BY = {
     "write": lambda done: bool(done & {"note_add:done", "note_replace:done"}),
     "promise": lambda done: bool(done & {"note_add:proposed", "note_replace:proposed"}),
     "desktop": lambda done: bool(done & {"desktop_window:done", "desktop_arrange:done"}),
-    "browse": lambda done: bool(done & {"web_browse:done", "web_research:done"}),
+    "browse": lambda done: bool(done & {"web_browse:done", "web_research:done", "browser_open:done", "browser_read:done"}),
+    "form": lambda done: bool(done & {"web_browse:done"}),
     "hands": lambda done: bool(done & {"web_browse:done"}),
     "action": lambda done: bool(done & {"note_add:done", "note_replace:done", "desktop_window:done", "desktop_arrange:done",
                                          "note_add:proposed", "note_replace:proposed"}),
@@ -97,7 +103,8 @@ SAID_INSTEAD = {
     "action": "Nothing was done: none of my tools reported it.",
     "desktop": "Nothing on the desktop was changed: none of my tools reported it.",
     "hands": "I cannot scroll, type or click inside a window, so that did not happen.",
-    "browse": "I have not done that in the browser: no browsing task ran.",
+    "browse": "I have not done that in the browser: none of my tools reported it.",
+    "form": "I cannot click, type or sign in on a web page, so that did not happen.",
     "lab": "I have not changed anything in the lab, and in this build I cannot.",
     "promise": "I cannot change how I behave by saying so. That takes a change you approve.",
 }
@@ -117,8 +124,10 @@ _HINTS = {
                 "You have no tool that changes a window."),
     "hands": (("web_browse",), "You cannot scroll, type or click inside a window yourself; to do it in the web browser, call web_browse with the whole task.",
               "You cannot scroll, type or click inside a window."),
-    "browse": (("web_browse",), "To do anything in the web browser, call web_browse with the whole task; to look something up, call web_research.",
-               "You have no tool that uses a web browser."),
+    "browse": (("browser_open",), "To open a web page in the browser on the owner's desktop, call browser_open with its address; "
+               "to read a page that is open, call browser_read.", "You have no tool that uses a web browser."),
+    "form": (("browser_open",), "You cannot click, type, scroll or sign in on a web page: browser_open opens a page and "
+             "browser_read reads it, and that is all.", "You cannot click, type, scroll or sign in on a web page."),
     "lab": ((), "You cannot change anything in the lab.", "You cannot change anything in the lab."),
     "promise": (("note_add",), "You cannot change your behaviour by promising. To put a standing wish forward, call note_add with the note USER and one short line.",
                 "You cannot change your behaviour by promising, and you have no tool that keeps a wish for later."),

@@ -10,3 +10,5 @@ asyncssh>=2.14
 # The service the panel talks to.
 starlette>=0.40
 uvicorn>=0.30
+# The browser on the desktop is driven over DevTools, a websocket through its TLS door.
+websockets>=15

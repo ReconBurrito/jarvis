@@ -706,6 +706,7 @@ site_file() {
 # The desktop shows the panel of a brain on this node. Where that brain answers and which certificate
 # authority signs for it are read from the brain's container; nothing in the brain is changed. The authority's
 # certificate is handed to the desktop, whose browser is then told to trust it for the brain's address only.
+# (After the install, hand_over_door gives the brain the desktop's door in return.)
 BRAIN_URL=""
 BRAIN_CA=""
 from_brain() {  # from_brain ID FILE: a small text file out of the brain's container
@@ -762,6 +763,36 @@ hand_over_trust() {
 hand_over_brain() {
     [ -n "$BRAIN_CA" ] || return 0
     pct push "$CTID" "$BRAIN_CA" /etc/jarvis/brain-ca.pem --perms 0644 >/dev/null
+}
+
+# The brain drives Jarvis's browser on the desktop through the desktop's TLS door (see
+# install/jarvis-desktop-install.sh). The door's certificate, which the desktop's installer made, and where the
+# door is, are handed to the brain, which pins that certificate. This is the one thing written into the brain
+# from here, into its folder of what it trusts; a brain that cannot be written to is said, and is no fault.
+DOOR_PORT=9223
+hand_over_door() {
+    local id="${S[brain]}" here pem
+    [ "$ROLE" = "desktop" ] && [ -n "$BRAIN_URL" ] || return 0
+    [ -n "$WORK" ] || WORK="$(mktemp -d)"
+    here="$(address)"
+    pem="$WORK/desktop-door.pem"
+    if ! is_ipv4 "$here" || ! timeout 30 pct exec "$CTID" --keep-env 0 -- cat /etc/jarvis/door/door.pem </dev/null 2>/dev/null \
+            | head -c 16384 > "$pem"; then
+        warn "the desktop's door could not be read, so the brain cannot drive Jarvis's browser yet. Run this again."
+        return 0
+    fi
+    if [ "$(grep -Ec -- '^-{5}BEGIN CERTIFICATE-{5}$' "$pem")" != "1" ] || [ "$(grep -Ec -- '-{5}BEGIN' "$pem")" != "1" ] \
+        || ! openssl x509 -in "$pem" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:jarvis-door[.]invalid'; then
+        warn "what the desktop has as its door's certificate is not one certificate for jarvis-door.invalid; the brain is not given it."
+        return 0
+    fi
+    printf '%s:%s\n' "$here" "$DOOR_PORT" > "$WORK/desktop-door.addr"
+    if pct push "$id" "$pem" /etc/jarvis/trust/desktop-door.pem --perms 0644 </dev/null >/dev/null 2>&1 \
+        && pct push "$id" "$WORK/desktop-door.addr" /etc/jarvis/trust/desktop-door.addr --perms 0644 </dev/null >/dev/null 2>&1; then
+        note "the brain in container $id may drive Jarvis's browser here, through the door at $here:$DOOR_PORT"
+    else
+        warn "the brain in container $id could not be given the desktop's door; update the brain (pct exec $id -- update), then run this again."
+    fi
 }
 
 # Hands the container its settings and the first-run script, which fetches the code, checks it and installs.
@@ -834,6 +865,7 @@ build_main() {
     hand_over_trust
     fix_gpu_group
     bootstrap
+    hand_over_door
     msg "Container $CTID is installed: Jarvis $ROLE at $(address)"
     note "To update it later: pct enter $CTID, then type: update"
     if [ "$ROLE" = "brain" ]; then

@@ -77,6 +77,13 @@ class Settings:
         return self.data_dir / "audit" / "audit.jsonl"
 
     @property
+    def door_files(self) -> tuple[Path, Path, Path, Path]:
+        """The browser door on the owner's desktop: where it is and its certificate (both handed over by the
+        desktop's build), and the brain's own client certificate and key for it (made by the installer)."""
+        return (self.trust_dir / "desktop-door.addr", self.trust_dir / "desktop-door.pem",
+                self.tls_dir / "door-client.pem", self.tls_dir / "door-client.key")
+
+    @property
     def notes_dir(self) -> Path:
         """The notes folder in Jarvis's state: the clone of the notes repository, and the vectors made from it."""
         return self.data_dir / "notes"

@@ -318,3 +318,18 @@ def test_a_second_browser_window_is_left_to_whoever_opened_it(desktop):
     desktop.wait(lambda: desktop.minimized(second), "the second window to be minimized", seconds=10)
     desktop.wait(lambda: not desktop.minimized(second), "the second window to come back", seconds=15)
     assert rect(second) == (700, 500) and rect(first[0]) == docked
+
+
+def test_a_browser_kept_from_outside_is_not_started_here_but_is_put_in_its_place(desktop):
+    """On the installed desktop Jarvis's browser runs as a user of its own, started from outside the desktop
+    (desktop/jarvis-browser-keeper.sh); the script only places its window."""
+    kept = desktop.tmp / "browser-kept"
+    kept.write_text("kept from outside\n")
+    desktop.env["JARVIS_BROWSER_KEPT"] = str(kept)
+    desktop.start(str(REPO / "desktop" / "jarvis-session.sh"))
+    desktop.wait(lambda: len(desktop.windows("jarvis-panel")) == 1, "the panel")
+    time.sleep(12)   # longer than the grace before a missing window is started
+    assert desktop.windows("jarvis-browser") == [], "the script started no browser of its own"
+    desktop.start(str(desktop.tmp / "browser"), f"--user-data-dir={desktop.tmp}/elsewhere", "--class=jarvis-browser",
+                  f"file://{REPO}/desktop/home.html")
+    desktop.wait(desktop.at_rest, "both windows in place")

@@ -17,7 +17,8 @@ It runs in two unprivileged containers on Proxmox VE:
 Under construction. So far: the installers, the update command, the desktop (the streamed Linux desktop
 with Jarvis's browser), the local model on the brain's GPU, Jarvis's core, and Jarvis's panel on the
 desktop, where you talk to it, its vault, and read-only tools for Proxmox, Proxmox Backup Server, OPNsense and
-the DNS servers and the switch, and its own notes, which it searches by words and by meaning and writes to. The
+the DNS servers and the switch, its own notes, which it searches by words and by meaning and writes to, and
+the browser on the desktop, where it opens and reads web pages. The
 voice arrives in the releases that follow. A full guide with pictures comes with the first complete release.
 
 
@@ -219,9 +220,54 @@ What protects that port:
 What this does not cover: a program running as the desktop's user outside the browser can say what it
 likes to the brain, and so can anything that drives the desktop's browser. The notes window speaks for you: what it
 saves is saved in your name, standing files included. The browser keeps pages in its sandbox so that there is no
-such program; before Jarvis is given a way to drive a browser on the desktop, the brain's own pages are closed to
-that browser, and before Jarvis is given tools that change the lab, approvals get a way of their own that the
+such program. Jarvis drives its browser on the desktop only so far as the next section says, and never on the
+brain's own pages. Before Jarvis is given tools that change the lab, approvals get a way of their own that the
 desktop cannot fake.
+
+## Jarvis's browser
+
+Jarvis has three read-only tools for the browser that fills the desktop beside its panel: which tabs are open
+(`browser_tabs`), open a web page in a new tab where you see it (`browser_open`), and read the text of a page
+that is open (`browser_read`). It cannot click, type, scroll or sign in, and says so. What a page says is handed
+to the model as information, never as an instruction.
+
+That browser is Jarvis's, not yours: it runs as a user of its own (uid 1001) with a profile of its own, and the
+desktop's firewall lets that user reach the internet over IPv4 and the name servers, and nothing private: not
+the brain, not the lab, not the desktop's own ports, and no IPv6 at all (there a lab's machines have global
+addresses like the internet's). You see it and can use it, but the lab's own pages do not open there,
+and what you sign in to there, Jarvis can read. It is kept open from outside the desktop
+(`desktop/jarvis-browser-keeper.sh`, the service `jarvis-browser`).
+
+How the brain reaches that browser, and who else cannot:
+
+1. The browser opens its DevTools port (9222) on the desktop container's loopback only. DevTools has no login
+   of its own and gives whoever reaches it the whole browser.
+2. A TLS door (`socat`, port 9223, as a user of its own) leads to it, and only while what listens there is
+   Jarvis's browser's user (`desktop/jarvis-door-forward.sh`). It takes TLS 1.3 only, and only a client
+   certificate signed by the brain's own authority for client use; the brain's installer makes that certificate,
+   and its key never leaves the brain. The desktop's firewall lets only the brain's address reach the door.
+3. The door has a certificate of its own, made by the desktop's installer. The installer on the Proxmox node
+   hands it, and where the door is, to the brain (`/etc/jarvis/trust/desktop-door.pem` and `.addr`), which pins
+   it. This is the one thing the desktop's installer writes into the brain.
+4. The desktop's own user and Jarvis's browser's user, and so every page, cannot reach either port.
+5. Jarvis opens only addresses on the internet and does not read a tab that shows anything else. While it opens
+   or reads a page, every request of that tab and of its frames and workers, redirects included, goes through
+   Jarvis first and is stopped unless it is for a public address, and Jarvis says what it stopped. This is the
+   second line; the firewall is the first, and it also covers what this one does not see (WebSockets, shared
+   workers, and everything the page does after Jarvis lets go).
+
+What this does not cover:
+
+1. Anything on the internet that Jarvis's browser is signed in to is open to Jarvis and to what a page tells it,
+   so sign in to nothing there that you would not hand Jarvis.
+2. A page can try to talk Jarvis into opening an address that carries what Jarvis knows (in its query, say) to a
+   site of the page's choosing. Opening a page is not yet something you approve; until it is, treat what Jarvis
+   has read in a turn as something a page could ask it to send on.
+3. Your network's own public address counts as the internet. If your router sends that address back into your
+   network (NAT reflection, port forwards) or shows its own pages there, Jarvis's browser reaches those too.
+4. Jarvis's browser shows its windows on the same screen as the panel. Its pages run in Chromium's sandbox; a page
+   that broke out of it could see and type into the desktop's other windows. `jarvis doctor` says whether the
+door answers.
 
 ## Talking to Jarvis in a terminal
 
@@ -287,7 +333,9 @@ What is done differently from the image's defaults, and why:
    3001. It is loaded before the network comes up, and Docker does not start without it.
 2. The same firewall keeps the desktop's own user away from the desktop's ports. Jarvis's browser runs as
    that user, so a web page shown on the desktop cannot connect to the desktop's control port and drive
-   it. (The web server in front of that port runs as another user and still can.)
+   it, nor to Jarvis's browser's DevTools port or the brain's door to it. (The web server in front of the
+   control port runs as another user and still can, as does the door.) Jarvis's browser itself runs as a
+   third user, which reaches only the internet (see "Jarvis's browser").
 3. Chromium keeps its sandbox. Inside a Proxmox container the image's launchers start Chromium with
    `--no-sandbox`; Jarvis replaces them. After every install and update it checks that they are still
    replaced and that nothing runs with `--no-sandbox`, then starts the browser for a moment and looks at
@@ -313,8 +361,9 @@ look without changing anything: `bash /opt/jarvis/install/jarvis-desktop-install
 Chromium is told not to save passwords or form data, and is given Jarvis's colour and start page
 (`desktop/policy.json`); open `chrome://policy` on the desktop to see that it took them.
 
-What this does not do: pages in the desktop's browser can reach whatever your network lets this container
-reach, so give it a network from which your other machines' management pages are not reachable. Going
+What this does not do: pages in a browser you start yourself from the desktop's menu (as the desktop's user) can
+reach whatever your network lets this container reach, so give it a network from which your other machines'
+management pages are not reachable. Jarvis's browser cannot. Going
 back to a release from before the desktop existed leaves Docker, the firewall and the desktop's
 container in place.
 

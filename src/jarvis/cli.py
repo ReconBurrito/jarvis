@@ -267,6 +267,16 @@ async def doctor(settings: Settings, quick: bool, out: TextIO, client: httpx.Asy
                     (warn if release_check else fault)(f"{system}: does not answer: {reading['error']}")
                 else:
                     ok(f"{system}: {summary(reading)}")
+        # The browser on the owner's desktop: no vault needed. A desktop that is off is not a release's fault.
+        if jarvis.browser:
+            warn(f"browser: no tools ({jarvis.browser})")
+        elif jarvis.browser == "":
+            tabs = await jarvis.tools.dispatch("doctor", "browser_tabs", {}, audit=False)
+            if "error" in tabs:
+                warn(f"browser: does not answer: {tabs['error']}")
+            else:
+                count = len(tabs["tabs"])
+                ok(f"browser: the door to the desktop's browser answers, {count} tab{'' if count == 1 else 's'} open")
         if jarvis.backend is None:
             ok(f"no local model is set (JARVIS_LOCAL_MODEL=none in {settings.site}); Jarvis cannot answer until one is")
             return 1 if faults else 0

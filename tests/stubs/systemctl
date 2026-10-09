@@ -13,9 +13,17 @@ case "$1" in
         done
         ;;
     disable)
-        [ "${*: -1}" = "jarvis.service" ] || exit 64
-        [ ! -f "$state/enabled" ] || sed -i '/^jarvis\.service$/d' "$state/enabled"
-        [[ " $* " != *" --now "* ]] || rm -f "$state/jarvis-running"
+        case "${*: -1}" in
+            jarvis.service)
+                [ ! -f "$state/enabled" ] || sed -i '/^jarvis\.service$/d' "$state/enabled"
+                [[ " $* " != *" --now "* ]] || rm -f "$state/jarvis-running"
+                ;;
+            jarvis-door.service)
+                [ ! -f "$state/enabled" ] || sed -i '/^jarvis-door\.service$/d' "$state/enabled"
+                [[ " $* " != *" --now "* ]] || rm -f "$state/door-running"
+                ;;
+            *) exit 64 ;;
+        esac
         ;;
     is-enabled)
         if grep -qxF "$2" "$state/enabled" 2>/dev/null; then echo enabled; else echo disabled; exit 1; fi
@@ -34,6 +42,12 @@ case "$1" in
                 echo started >> "$state/jarvis-starts"
                 : > "$state/jarvis-running"
                 ;;
+            jarvis-browser.service) : > "$state/keeper-running" ;;
+            jarvis-door.service)
+                [ ! -f "$state/door-wont-start" ] || exit 1
+                echo started >> "$state/door-starts"
+                : > "$state/door-running"
+                ;;
             *) exit 64 ;;
         esac
         ;;
@@ -42,6 +56,8 @@ case "$1" in
         case "${*: -1}" in
             ollama) [ -f "$state/ollama-running" ] ;;
             jarvis.service) [ -f "$state/jarvis-running" ] ;;
+            jarvis-door.service) [ -f "$state/door-running" ] ;;
+            jarvis-browser.service) [ -f "$state/keeper-running" ] ;;
             *) exit 3 ;;
         esac
         ;;
