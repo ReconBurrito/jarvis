@@ -1,0 +1,83 @@
+/* Jarvis's notes window: a shelf of notes at the left, the note at the right. */
+@font-face { font-family: "Oxanium"; src: url("Oxanium.ttf"); font-weight: 200 800; }
+:root {
+  color-scheme: dark;
+  --deep: #04101a; --well: #081b29; --line: #1a4459; --glow: #5fd6ff; --ice: #d6f2ff; --mute: #7ba6ba; --amber: #ffb454;
+  --edge: 18px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: radial-gradient(90% 30% at 30% 0%, #0b2a3d 0%, rgba(11, 42, 61, 0) 70%), var(--deep);
+  color: var(--ice); font: 400 15px/1.55 "Oxanium", "DejaVu Sans", sans-serif;
+  display: grid; grid-template-columns: minmax(200px, 270px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+.hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+:focus-visible { outline: 2px solid var(--glow); outline-offset: 2px; }
+button { font: inherit; cursor: pointer; }
+input, textarea { font: inherit; color: var(--ice); background: var(--well); border: 1px solid var(--line); border-radius: 2px; }
+input:focus-visible, textarea:focus-visible { outline: none; border-color: var(--glow); }
+input::placeholder { color: #4f7486; }
+
+.name { grid-column: 1 / -1; padding: 12px var(--edge) 8px; display: flex; gap: 14px; align-items: baseline; border-bottom: 1px solid var(--line); }
+.name b { font-weight: 600; font-size: 17px; letter-spacing: .34em; color: var(--glow); }
+.name span { font-size: 13px; color: var(--mute); }
+#where { margin-left: auto; font-size: 12px; color: #4f7486; }
+
+.shelf { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 8px; padding: 12px 0 12px var(--edge); border-right: 1px solid var(--line); min-height: 0; }
+#filter { width: calc(100% - 12px); padding: 6px 9px; }
+.list { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; padding-right: 12px; font-size: 14px; }
+.list h2 { margin: 12px 0 2px; font-size: 12px; font-weight: 600; letter-spacing: .06em; color: #4f7486; text-transform: uppercase; }
+.list h2:first-child { margin-top: 0; }
+.list button { display: block; width: 100%; text-align: left; padding: 3px 8px; border: 0; border-left: 2px solid transparent; background: none; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list button:hover { color: var(--ice); }
+.list button.open { color: var(--ice); border-left-color: var(--glow); background: var(--well); }
+.list button.standing::after { content: "  standing"; font-size: 11px; color: var(--amber); }
+.create { display: flex; gap: 6px; padding-right: 12px; }
+.create input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px; }
+.create button, .tools button {
+  padding: 5px 11px; border: 1px solid var(--glow); border-radius: 2px; background: transparent; color: var(--glow); font-weight: 600; font-size: 13px;
+}
+.create button:hover, .tools button:hover { background: rgba(95, 214, 255, .12); }
+.tools button:disabled { border-color: var(--line); color: #4f7486; background: transparent; cursor: default; }
+#save.unsaved { border-color: var(--amber); color: var(--amber); }
+
+.page { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px var(--edge); border-bottom: 1px solid var(--line); }
+.bar h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .02em; overflow-wrap: anywhere; }
+.badge { font-size: 12px; padding: 1px 8px; border: 1px solid var(--amber); color: var(--amber); border-radius: 2px; }
+.badge.source { border-color: var(--line); color: var(--mute); }
+.tools { margin-left: auto; display: flex; gap: 8px; }
+
+.view { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; padding: 14px var(--edge) 24px; max-width: 86ch; }
+.view .empty { color: var(--mute); }
+.view h1, .view h2, .view h3, .view h4, .view h5, .view h6 { color: var(--glow); font-weight: 600; line-height: 1.3; margin: 1.2em 0 .45em; }
+.view > :first-child { margin-top: 0; }
+.view h1 { font-size: 22px; } .view h2 { font-size: 18px; } .view h3 { font-size: 16px; } .view h4, .view h5, .view h6 { font-size: 15px; color: var(--ice); }
+.view p, .view ul, .view ol, .view blockquote, .view pre, .view .table { margin: 0 0 .8em; }
+.view ul, .view ol { padding-left: 1.4em; }
+.view li { margin: .15em 0; }
+.view li.task { list-style: none; margin-left: -1.2em; }
+.view .box { display: inline-block; width: .8em; height: .8em; border: 1px solid var(--mute); margin-right: .55em; vertical-align: -.05em; }
+.view .box.done { background: var(--glow); border-color: var(--glow); }
+.view a { color: var(--glow); text-underline-offset: 3px; }
+.view code { font-family: "DejaVu Sans Mono", monospace; font-size: .88em; background: var(--well); padding: 0 .3em; }
+.view pre { background: var(--well); border-left: 2px solid var(--line); padding: 10px 12px; overflow-x: auto; }
+.view pre code { background: none; padding: 0; }
+.view blockquote { border-left: 2px solid var(--line); padding-left: 12px; color: var(--mute); margin-left: 0; }
+.view hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.view .table { overflow-x: auto; }
+.view table { border-collapse: collapse; font-size: 14px; }
+.view th, .view td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
+.view th { color: var(--glow); font-weight: 600; }
+
+.editor { margin: 12px var(--edge); min-height: 0; resize: none; padding: 10px 12px; font: 14px/1.55 "DejaVu Sans Mono", monospace; tab-size: 4; }
+.status { padding: 6px var(--edge) 10px; font-size: 13px; color: var(--mute); min-height: 2.2em; border-top: 1px solid var(--line); }
+.status.trouble { color: var(--amber); }
+.status button { margin-left: 10px; padding: 1px 8px; border: 1px solid var(--amber); background: none; color: var(--amber); border-radius: 2px; }
+
+@media (max-width: 720px) {
+  body { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(0, 1fr); }
+  .shelf { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; padding-right: var(--edge); }
+}

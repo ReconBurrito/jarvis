@@ -18,7 +18,7 @@ Under construction. So far: the installers, the update command, the desktop (the
 with Jarvis's browser), the local model on the brain's GPU, Jarvis's core, and Jarvis's panel on the
 desktop, where you talk to it, its vault, and read-only tools for Proxmox, Proxmox Backup Server, OPNsense and
 the DNS servers and the switch, and its own notes, which it searches by words and by meaning and writes to. The
-notes window and the voice arrive in the releases that follow. A full guide with pictures comes with the first complete release.
+voice arrives in the releases that follow. A full guide with pictures comes with the first complete release.
 
 
 ## Rules for this repository
@@ -178,6 +178,14 @@ embedding model) and `notes_read`, naming the note it used. When you ask it to w
 4. Text that looks like a secret, or holds a value of the vault, is never written.
 5. The audit log records which note changed and the commit, never the text.
 
+The **Notes** link at the foot of the panel opens the notes in a window of their own: a shelf of notes (the standing
+files first, then each folder, with a filter), the note as it reads, and Edit to change its text. A link from one
+note to another opens it there. Saving (the button, or Ctrl+S) commits on main in the name "Owner", with Jarvis as
+committer, and you may change the standing files directly. A save names the version it started from: when the note
+changed meanwhile, nothing is overwritten, and what you typed stays in the editor. Sources under `raw/` open read
+only. The window renders Markdown with its own small renderer, which builds the page from text only, so nothing in a
+note can become markup or script.
+
 ## Jarvis's panel
 
 The panel docked at the edge of the desktop is where you talk to Jarvis: a box to type in, the
@@ -206,11 +214,14 @@ What protects that port:
    says truthfully which page a request comes from), only under the brain's own address as its name, and
    the panel cannot be shown inside another page. The panel loads no script, style or picture from
    anywhere but the brain.
-4. The service runs as the user `jarvis` and can write its audit log and nothing else on the system.
+4. The service runs as the user `jarvis` and can write its audit log and its notes, and nothing else on the system.
 
 What this does not cover: a program running as the desktop's user outside the browser can say what it
-likes to the brain. The browser keeps pages in its sandbox so that there is no such program; before Jarvis
-is given tools that change the lab, approvals get a way of their own that the desktop cannot fake.
+likes to the brain, and so can anything that drives the desktop's browser. The notes window speaks for you: what it
+saves is saved in your name, standing files included. The browser keeps pages in its sandbox so that there is no
+such program; before Jarvis is given a way to drive a browser on the desktop, the brain's own pages are closed to
+that browser, and before Jarvis is given tools that change the lab, approvals get a way of their own that the
+desktop cannot fake.
 
 ## Talking to Jarvis in a terminal
 

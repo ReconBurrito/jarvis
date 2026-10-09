@@ -430,35 +430,61 @@ class BrainRepo:
 
     async def save_as_owner(
         self, files: dict[str, str], message: str, name: str, unchanged: Callable[[], Awaitable[None] | None] | None = None
-    ) -> str:
-        """Write what the owner typed in the built-in editor, on main, in the owner's name. Returns the commit.
+    ) -> tuple[str, dict[str, str]]:
+        """Write what the owner typed in the notes window, on main, in the owner's name.
+
+        Returns the commit and each file's text as it stands after the save (read under the same lock, so a change
+        merged in from the remote is part of it). Either the save is on the remote too, or nothing has changed here:
+        a save that cannot be sent is undone, so the owner can simply save again.
 
         The proposal rule guards against Jarvis's own writes, so it does not apply here: the owner may change the
-        standing files directly. Raw sources stay immutable and nothing that looks like a secret is committed.
+        standing files directly. Sources stay immutable and nothing that looks like a secret is committed.
         """
         author = re.sub(r"[<>\r\n]", "", name).strip() or "Owner"
         async with self._locked():
             if not self.ready:
                 raise BrainError(f"the notes are not available: {self.detail}")
             if unchanged is not None:
-                unchanged()  # raises when the note is no longer what the editor started from; checked under the lock
+                unchanged()  # raises when the note is no longer what the window started from; checked under the lock
             self._check(files, main=False)
-            self._write(self.path, files)
-            await self._git("add", "--", *files)
-            if not await self._git("status", "--porcelain", "--", *files):
-                return await self._git("rev-parse", "--short", "HEAD")
-            await self._git("commit", f"--author={author} <owner@jarvis.invalid>", "-m", message, "--", *files)
+            before = await self._git("rev-parse", "HEAD")
+            kept = {rel: (self.resolve(rel).read_bytes() if self.resolve(rel).is_file() else None) for rel in files}
+            stage = "written"
+            try:
+                self._write(self.path, files)
+                await self._git("add", "--", *files)
+                if await self._git("status", "--porcelain", "--", *files):
+                    await self._git("commit", f"--author={author} <owner@jarvis.invalid>", "-m", message, "--", *files)
+                    if self.can_push:
+                        stage = "sent"
+                        await self._git("pull", "--rebase", "origin", "main")
+                        await self._git("push", "origin", "main")
+            except (BrainError, OSError) as exc:
+                await self._git("rebase", "--abort", check=False)
+                if await self._git("rev-parse", "HEAD", check=False) != before:
+                    # Back to a clean tree without the owner's commit. What the remote added meanwhile stays: it is on
+                    # the remote anyway, and dropping it would leave it half in the index.
+                    upstream = "refs/remotes/origin/main"
+                    back = upstream if (self.can_push and await self._git_ok("merge-base", "--is-ancestor", before, upstream)) else before
+                    await self._git("reset", "-q", "--keep", back, check=False)
+                else:
+                    await self._git("reset", "-q", "--", *files, check=False)
+                    for rel, data in kept.items():
+                        target = self.resolve(rel)
+                        if data is None:
+                            target.unlink(missing_ok=True)
+                        else:
+                            target.write_bytes(data)
+                if stage == "sent":
+                    reason = "the notes could not be brought up to date with the remote or sent to it"   # git's words name the remote
+                elif isinstance(exc, OSError):
+                    reason = exc.strerror or "the file could not be written"
+                else:
+                    reason = str(exc)
+                raise BrainError(f"nothing was saved: {reason}") from None
             commit = await self._git("rev-parse", "--short", "HEAD")
-            if self.can_push:
-                try:
-                    await self._git("pull", "--rebase", "origin", "main")
-                    await self._git("push", "origin", "main")
-                except BrainError as exc:
-                    await self._git("rebase", "--abort", check=False)
-                    raise BrainError(f"saved here as {commit}, but it could not be sent to GitHub: {exc}") from None
-                commit = await self._git("rev-parse", "--short", "HEAD")
             self.detail = f"main at {commit}"
-            return commit
+            return commit, {rel: self.read(rel) for rel in files}
 
     async def propose(self, name: str, files: dict[str, str], message: str) -> str:
         """Put a change on a proposal branch for the owner to review. The working tree stays on main."""

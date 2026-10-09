@@ -36,8 +36,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from .audit import digest
 from .config import Settings
 from .core import Jarvis
+from .notes.editor import EditConflict, open_note, save_note, tree
+from .notes.repo import BrainError
 
 SURFACE = ("The owner types to you in your panel, which is docked beside a web browser on their desktop, and "
            "reads your answers there.")
@@ -54,6 +57,10 @@ FILES = {
     "index.html": (WEB, "text/html; charset=utf-8"),
     "panel.css": (WEB, "text/css; charset=utf-8"),
     "panel.js": (WEB, "text/javascript; charset=utf-8"),
+    "notes.html": (WEB, "text/html; charset=utf-8"),
+    "notes.css": (WEB, "text/css; charset=utf-8"),
+    "notes.js": (WEB, "text/javascript; charset=utf-8"),
+    "markdown.js": (WEB, "text/javascript; charset=utf-8"),
     "Oxanium.ttf": (SHARED, "font/ttf"),
     "icon.png": (SHARED, "image/png"),
 }
@@ -309,6 +316,61 @@ def create_app(jarvis: Jarvis, settings: Settings) -> Guard:
         panel.new()
         return JSONResponse({"ok": True})
 
+    def notes_or_none() -> Any:
+        repo = jarvis.notes
+        return repo if repo is not None and jarvis.vault.status == "unlocked" else None
+
+    async def notes_tree(request: Request) -> Response:
+        repo = notes_or_none()
+        if repo is None:
+            return JSONResponse({"error": "Jarvis has no notes yet: " + (jarvis.lab.get("notes") or "they are not in the vault")}, status_code=503)
+        if not repo.ready:
+            await repo.start()
+        if not repo.ready:
+            return JSONResponse({"error": f"the notes are not available: {repo.detail}"}, status_code=503)
+        return JSONResponse(tree(repo))
+
+    async def notes_open(request: Request) -> Response:
+        repo = notes_or_none()
+        if repo is None or not repo.ready:
+            return JSONResponse({"error": "the notes are not available"}, status_code=503)
+        try:
+            return JSONResponse(open_note(repo, request.query_params.get("path", "")))
+        except (BrainError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    async def notes_save(request: Request) -> Response:
+        repo = notes_or_none()
+        if repo is None:
+            return JSONResponse({"error": "the notes are not available"}, status_code=503)
+        try:
+            body = await request.json()
+            path, text, base = body["path"], body["text"], body.get("base", "")
+            if not all(isinstance(value, str) for value in (path, text, base)):
+                raise TypeError
+        except (ValueError, KeyError, TypeError, AttributeError, UnicodeDecodeError):
+            return JSONResponse({"error": "that is not a note the window sends"}, status_code=400)
+        record = {"path": path[:200], "by": "owner", "chars": len(text), "digest": digest(text)}
+        try:
+            saved = await save_note(repo, path, text, base)
+        except EditConflict as exc:
+            jarvis.audit.append("note_save_failed", {**record, "reason": "changed meanwhile"})
+            return JSONResponse({"error": str(exc), "conflict": True}, status_code=409)
+        except BrainError as exc:
+            with contextlib.suppress(Exception):
+                jarvis.audit.append("note_save_failed", {**record, "reason": str(exc)[:200]})
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except OSError as exc:   # said without the paths of this machine
+            with contextlib.suppress(Exception):
+                jarvis.audit.append("note_save_failed", {**record, "reason": exc.strerror or type(exc).__name__})
+            return JSONResponse({"error": "nothing was saved: " + (exc.strerror or "the file could not be written")}, status_code=400)
+        try:
+            jarvis.audit.append("note_saved", {**record, "commit": saved["commit"], "protected": saved["protected"]})
+        except Exception:
+            # The note is saved and sent; saying otherwise would make the owner save it again.
+            saved["warning"] = "The audit log could not be written; see jarvis doctor."
+        return JSONResponse(saved)
+
     async def watch_vault() -> None:
         """An unlock (or a new vault file) is noticed within seconds; the conversation is not lost to a restart."""
         while True:
@@ -344,6 +406,9 @@ def create_app(jarvis: Jarvis, settings: Settings) -> Guard:
         Route("/api/state", state, methods=["GET"]),
         Route("/api/chat", chat, methods=["POST"]),
         Route("/api/new", new, methods=["POST"]),
+        Route("/api/notes", notes_tree, methods=["GET"]),
+        Route("/api/notes/note", notes_open, methods=["GET"]),
+        Route("/api/notes/note", notes_save, methods=["PUT"]),
         Route("/panel/ping", ping, methods=["GET"]),
         Route("/panel/", page, methods=["GET"]),
         Route("/panel/{name}", page, methods=["GET"]),

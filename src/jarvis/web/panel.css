@@ -96,8 +96,9 @@ button { font: inherit; cursor: pointer; }
 #send:disabled { border-color: var(--line); color: #4f7486; cursor: default; background: transparent; }
 
 footer { padding: 2px var(--edge) 10px; font-size: 12.5px; color: #4f7486; display: flex; justify-content: space-between; align-items: baseline; }
-#new { padding: 2px 0; border: 0; background: none; color: var(--mute); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
-#new:hover { color: var(--ice); }
+#new, #notes { padding: 2px 0; border: 0; background: none; color: var(--mute); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+#notes { margin-left: 16px; }
+#new:hover, #notes:hover { color: var(--ice); }
 #new:disabled { color: #4f7486; text-decoration: none; cursor: default; }
 
 /* A low screen: the conversation matters more than the clock. */

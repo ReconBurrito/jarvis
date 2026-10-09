@@ -300,3 +300,9 @@ fresh.addEventListener("click", async () => {
 controls();
 read();
 text.focus();
+
+// The notes open in a window of their own beside the panel; asked again, the same window comes to the front.
+el("notes").addEventListener("click", () => {
+  const notes = window.open("notes.html", "jarvis-notes", "popup,width=1120,height=780");
+  if (notes) notes.focus();
+});

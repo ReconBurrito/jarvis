@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Jarvis notes</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="notes.css">
+<!-- Jarvis's notes, in a window of their own on the desktop. The owner reads and edits them here; Jarvis reads
+     and writes the same notes with its tools. Everything comes from Jarvis itself, like the panel. -->
+
+<header class="name"><b>JARVIS</b><span>Notes</span><span id="where"></span></header>
+
+<nav class="shelf" aria-label="Notes">
+  <label class="hidden" for="filter">Find a note</label>
+  <input id="filter" type="search" placeholder="Find a note" autocomplete="off">
+  <div id="list" class="list"></div>
+  <form id="create" class="create" autocomplete="off">
+    <label class="hidden" for="new-path">Name of a new note</label>
+    <input id="new-path" placeholder="wiki/new-note.md" spellcheck="false">
+    <button type="submit">New note</button>
+  </form>
+</nav>
+
+<section class="page" aria-labelledby="path">
+  <div class="bar">
+    <h1 id="path">No note open</h1>
+    <span id="badge" class="badge" hidden></span>
+    <span class="tools">
+      <button id="mode" type="button" disabled>Edit</button>
+      <button id="save" type="button" disabled>Save</button>
+    </span>
+  </div>
+  <article id="view" class="view" tabindex="0">
+    <p class="empty">Choose a note on the left, or make a new one. A note opens as it reads; Edit shows its text.</p>
+  </article>
+  <label class="hidden" for="editor">Text of the note</label>
+  <textarea id="editor" class="editor" spellcheck="true" hidden></textarea>
+  <div id="status" class="status" role="status"></div>
+</section>
+
+<script src="markdown.js"></script>
+<script src="notes.js"></script>
+</html>
