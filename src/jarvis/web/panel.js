@@ -132,7 +132,7 @@ function readings(state) {
     cluster.className = "";
     cluster.title = ((state.lab || {}).proxmox) || "";
   }
-  const SYSTEMS = {proxmox: "the Proxmox cluster", pbs: "the backup server", opnsense: "the firewall", dns: "the DNS servers", switch: "the switch"};
+  const SYSTEMS = {proxmox: "the Proxmox cluster", pbs: "the backup server", opnsense: "the firewall", dns: "the DNS servers", switch: "the switch", notes: "your notes"};
   const ready = Object.keys(SYSTEMS).filter((name) => (state.lab || {})[name] === "ready").map((name) => SYSTEMS[name]);
   el("scope").textContent = ready.length
     ? "This machine and " + (ready.length > 1 ? ready.slice(0, -1).join(", ") + " and " + ready[ready.length - 1] : ready[0]) + ", so far."

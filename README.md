@@ -17,7 +17,8 @@ It runs in two unprivileged containers on Proxmox VE:
 Under construction. So far: the installers, the update command, the desktop (the streamed Linux desktop
 with Jarvis's browser), the local model on the brain's GPU, Jarvis's core, and Jarvis's panel on the
 desktop, where you talk to it, its vault, and read-only tools for Proxmox, Proxmox Backup Server, OPNsense and
-the DNS servers and the switch. The voice arrives in the releases that follow. A full guide with pictures comes with the first complete release.
+the DNS servers and the switch, and its own notes, which it searches by words and by meaning and writes to. The
+notes window and the voice arrive in the releases that follow. A full guide with pictures comes with the first complete release.
 
 
 ## Rules for this repository
@@ -152,6 +153,7 @@ What Jarvis reads with it so far:
 | Proxmox Backup Server, read-only | `JARVIS_PBS_TOKEN_ID` (such as `jarvis@pbs!ro`), `JARVIS_PBS_TOKEN_SECRET`, `JARVIS_PBS_HOSTS` (as above; name the certificate's name, since a self-signed one seldom holds the address) | The server's own certificate as `/etc/jarvis/trust/pbs.pem` (owner root, mode 0644), pinned: check its fingerprint against the one on the server's dashboard |
 | OPNsense, read-only | `JARVIS_OPNSENSE_API_KEY`, `JARVIS_OPNSENSE_API_SECRET`, `JARVIS_OPNSENSE_HOSTS` (as above) | The web certificate as `/etc/jarvis/trust/opnsense.pem`, pinned; pin it again when OPNsense renews it |
 | A TP-Link (Omada) switch, read-only, over SSH | `JARVIS_SWITCH_USER`, `JARVIS_SWITCH_PASSWORD` (a view-only user), `JARVIS_SWITCH_HOST` (its address) | Its SSH host key as `/etc/jarvis/trust/switch_known_hosts`, one line as `ssh-keyscan` prints it, checked against the key you know; the password is sent only after that key is verified |
+| Jarvis's notes: a git repository of Markdown files (sources, wiki pages, daily notes) | `JARVIS_NOTES_REPO` (such as `git@github.com:you/notes.git`), `JARVIS_NOTES_DEPLOY_KEY` (a deploy key with write access to that one repository: the private key, or it in base64) | GitHub's published host keys, which the installer puts in `/etc/jarvis/trust/github_known_hosts`. The key is held by an ssh-agent of Jarvis's own, in memory only. |
 | DNS servers (such as PiHoles) | `JARVIS_DNS_SERVERS` (`address=name` with commas between), `JARVIS_DNS_LAB_NAME` (a name only your own DNS answers) | Nothing: no credential is used; each server is asked three ordinary questions |
 
 A system with none of its values in the vault is simply left out. `jarvis doctor` reads each system that is set
@@ -161,6 +163,20 @@ are not masked in Jarvis's answers; everything else is.
 Make every credential read-only. Proxmox: an API token of its own user with the `PVEAuditor` role on `/`, privilege
 separation on. Backup server: a token with the `Audit` role on `/`. OPNsense: a user holding only the "Lobby:
 Dashboard" privilege, with an API key. Jarvis only ever sends GET requests, to a fixed list of paths.
+
+## Jarvis's notes
+
+Jarvis keeps a clone of its notes repository in `/var/lib/jarvis/notes` and brings it up to date when the vault
+opens and before every change. It answers from its notes with `notes_search` (by words, and by meaning through the
+embedding model) and `notes_read`, naming the note it used. When you ask it to write something down it uses
+`note_add` or `note_replace`, and the rules are kept in code, whatever the model asks for:
+
+1. An ordinary note is changed on main, one commit per change, in Jarvis's name, and sent to the remote.
+2. `SOUL.md`, `MEMORY.md`, `USER.md`, `HEARTBEAT.md`, `SCHEMA.md` and everything under `skills/` shape how Jarvis
+   behaves, so a change to them goes to a branch `proposal/note-NAME` and takes effect when you merge it.
+3. Files under `raw/` are sources, kept as they were filed, and never changed. Nothing is written through a link.
+4. Text that looks like a secret, or holds a value of the vault, is never written.
+5. The audit log records which note changed and the commit, never the text.
 
 ## Jarvis's panel
 

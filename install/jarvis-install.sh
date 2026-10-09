@@ -343,7 +343,7 @@ service_unit() {
         "NoNewPrivileges=true" "ProtectSystem=strict" "ProtectHome=read-only" "PrivateTmp=true" \
         "ProtectControlGroups=true" "LockPersonality=true" \
         "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" \
-        "ReadWritePaths=$STATE/audit" "" "[Install]" "WantedBy=multi-user.target"
+        "ReadWritePaths=$STATE/audit $STATE/notes" "" "[Install]" "WantedBy=multi-user.target"
 }
 
 # Prints what is wrong with the certificates, one line each, for the address given; nothing when all is well.
@@ -481,6 +481,9 @@ apply() {
     [ ! -L "$STATE/audit" ] && { [ ! -e "$STATE/audit" ] || [ -d "$STATE/audit" ]; } \
         || die "$STATE/audit is not a folder (a link or a file is in its place). It was left as it is; look at it and move it away."
     install -d -m 0700 -o jarvis -g jarvis "$STATE/audit"
+    [ ! -L "$STATE/notes" ] && { [ ! -e "$STATE/notes" ] || [ -d "$STATE/notes" ]; } \
+        || die "$STATE/notes is not a folder (a link or a file is in its place). It was left as it is; look at it and move it away."
+    install -d -m 0700 -o jarvis -g jarvis "$STATE/notes"
     [ -n "$(site_get JARVIS_HOST_DESCRIPTION)" ] || site_set JARVIS_HOST_DESCRIPTION "$(describe_host)"
     # Jarvis reads its .env files and never writes them; only root can change what is in here.
     env_dir_ok "$ENV_DIR" || die "$ENV_DIR cannot be the folder for the .env files (JARVIS_ENV_DIR in $JARVIS_SITE)."
@@ -505,6 +508,8 @@ apply() {
 
     say "The vault"
     install -d -m 0755 -o root -g root "$TRUST"
+    # GitHub's published host keys, for the notes repository: Jarvis talks to GitHub only when they match.
+    install -m 0644 -o root -g root "$JARVIS_CHECKOUT/trust/github_known_hosts" "$TRUST/github_known_hosts"
     if [ "$SECRETS_MODE" = "sops" ]; then
         apt_install age
         install_sops
@@ -561,6 +566,12 @@ check() {
     [ "$(stat -c '%U:%G %a' "$STATE" 2>/dev/null)" = "root:jarvis 750" ] || wrong+=("$STATE must belong to root, group jarvis, mode 0750")
     if [ -L "$STATE/audit" ] || [ ! -d "$STATE/audit" ] || [ "$(stat -c '%U:%G %a' "$STATE/audit")" != "jarvis:jarvis 700" ]; then
         wrong+=("$STATE/audit must be a folder of the user jarvis, mode 0700")
+    fi
+    if [ -L "$STATE/notes" ] || [ ! -d "$STATE/notes" ] || [ "$(stat -c '%U:%G %a' "$STATE/notes")" != "jarvis:jarvis 700" ]; then
+        wrong+=("$STATE/notes must be a folder of the user jarvis, mode 0700")
+    fi
+    if ! cmp -s "$JARVIS_CHECKOUT/trust/github_known_hosts" "$TRUST/github_known_hosts"; then
+        wrong+=("$TRUST/github_known_hosts is not GitHub's host keys as this release records them")
     fi
     # Looked at before anything in it is run.
     if [ -n "$(find "$VENVS" ! -user root -print -quit 2>/dev/null)" ]; then

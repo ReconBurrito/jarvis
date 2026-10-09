@@ -170,7 +170,7 @@ def records(config):
 def test_the_lab_tools_come_with_the_unlock_and_go_with_the_lock(tmp_path):
     jarvis, config, key = bench(tmp_path, unlocked=False)
     assert jarvis.vault.status == LOCKED and jarvis.tools.names() == ["local_status"]
-    assert jarvis.lab == dict.fromkeys(("proxmox", "pbs", "opnsense", "dns", "switch"), "the vault is locked") and "jarvis-unlock" in jarvis.lab_note()
+    assert jarvis.lab == dict.fromkeys(("proxmox", "pbs", "opnsense", "dns", "switch", "notes"), "the vault is locked") and "jarvis-unlock" in jarvis.lab_note()
     unlock(config, key)
     assert jarvis.refresh() is True and jarvis.vault.status == UNLOCKED
     assert jarvis.tools.names() == ["local_status", "proxmox_cluster_status", "proxmox_guests", "proxmox_node_status", "proxmox_storage"]
@@ -417,4 +417,61 @@ def test_every_system_in_the_vault_gets_its_tools_and_one_left_out_is_not_mentio
     jarvis.refresh()
     assert jarvis.lab == {"proxmox": "", "dns": "cannot be set up: ValueError"}
     assert [name for name in jarvis.tools.names() if not name.startswith("proxmox_")] == ["local_status"]
+    run(jarvis.close())
+
+
+def test_the_notes_come_from_the_vault_like_the_lab_systems(tmp_path):
+    import base64
+    import os
+    import subprocess as sp
+
+    jarvis, config, key = bench(tmp_path)
+    public = (tmp_path / "keys" / "recipient").read_text().strip()
+    origin = tmp_path / "notes.git"
+    seed = tmp_path / "seed"
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    for args, cwd in ((["init", "-q", "--bare", "-b", "main", str(origin)], tmp_path), (["init", "-q", "-b", "main", str(seed)], tmp_path)):
+        sp.run(["git", *args], cwd=cwd, env=env, check=True)
+    (seed / "README.md").write_text("# Notes\n\nInvented for this test.\n")
+    for args in (["add", "-A"], ["-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-q", "-m", "seed"],
+                 ["push", "-q", str(origin), "main"]):
+        sp.run(["git", *args], cwd=seed, env=env, check=True)
+    block = "-----" + "BEGIN OPENSSH PRIVATE " + "KEY-----"   # put together here, so this file holds no key block
+    made_up_key = base64.b64encode(f"{block}\nnot a real key\n".encode()).decode()
+    vault_file(config.env_dir / "lab.enc.env", dict(VALUES, JARVIS_NOTES_REPO=str(origin), JARVIS_NOTES_DEPLOY_KEY=made_up_key), public)
+    jarvis.refresh()
+    assert jarvis.lab["notes"] == ""
+    assert {"notes_search", "notes_read", "note_add", "note_replace"} <= set(jarvis.tools.names())
+    run(jarvis.notes.start())
+    assert jarvis.notes.ready and jarvis.notes.read("README.md").startswith("# Notes")
+    assert jarvis.notes.path == config.data_dir / "notes" / "repo"
+    import io
+
+    from jarvis import cli
+    out, original = io.StringIO(), cli.Jarvis
+    cli.Jarvis = lambda *args, **kwargs: jarvis
+    try:
+        run(cli.doctor(config, True, out, client=FakeOllama().client()))
+    finally:
+        cli.Jarvis = original
+    said = out.getvalue()
+    assert "WARNING: notes: main at " in said and ", 1 notes; search by words only: meaning search unavailable" in said, said
+    # A remote over SSH needs GitHub's host keys pinned, and a private key, not a public one.
+    vault_file(config.env_dir / "lab.enc.env", dict(VALUES, JARVIS_NOTES_REPO="git@github.com:example/notes.git",
+                                                    JARVIS_NOTES_DEPLOY_KEY=made_up_key), public)
+    jarvis.refresh()
+    assert jarvis.lab["notes"].endswith("github_known_hosts is missing (the installer puts GitHub's published host keys there)")
+    (config.trust_dir / "github_known_hosts").write_text("github.com ssh-ed25519 made-up-for-this-test\n")
+    vault_file(config.env_dir / "lab.enc.env", dict(VALUES, JARVIS_NOTES_REPO="git@github.com:example/notes.git",
+                                                    JARVIS_NOTES_DEPLOY_KEY="ssh-ed25519 AAAAmadeup public"), public)
+    jarvis.refresh()
+    assert jarvis.lab["notes"].startswith("cannot be set up: JARVIS_NOTES_DEPLOY_KEY is neither")
+    assert not any(name.startswith("note") for name in jarvis.tools.names())
+    run(jarvis.close())
+
+
+def test_only_credentials_count_as_secrets_in_a_note(tmp_path):
+    jarvis, config, key = bench(tmp_path)
+    assert jarvis.vault.holds_secret(f"the token is {TOKEN}")
+    assert not jarvis.vault.holds_secret("jarvis@pve!ro and 192.0.2.11=pve1"), "an account name or an address is not a secret"
     run(jarvis.close())

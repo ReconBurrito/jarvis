@@ -50,7 +50,7 @@ def test_install_makes_the_certificates_the_rule_and_the_unit_and_starts_jarvis(
 
     unit = bench.read("/etc/systemd/system/jarvis.service")
     for line in ("User=jarvis", "ExecStart=/opt/jarvis-venv/current/bin/python -I -m jarvis serve", "NoNewPrivileges=true",
-                 "ProtectSystem=strict", "ReadWritePaths=/var/lib/jarvis/audit", "Requires=jarvis-firewall.service",
+                 "ProtectSystem=strict", "ReadWritePaths=/var/lib/jarvis/audit /var/lib/jarvis/notes", "Requires=jarvis-firewall.service",
                  "StartLimitIntervalSec=120", "StartLimitBurst=5", "Restart=on-failure", "LimitCORE=0",
                  "After=network-online.target ollama.service jarvis-firewall.service", "WantedBy=multi-user.target"):
         assert line + "\n" in unit, line
@@ -58,6 +58,12 @@ def test_install_makes_the_certificates_the_rule_and_the_unit_and_starts_jarvis(
     assert {"jarvis-firewall.service", "jarvis.service"} <= set(state(bench, "enabled").split())
     assert state(bench, "jarvis-starts") == "started\n"
     assert bench.sh(CHECK).returncode == 0
+    # The notes: a folder of Jarvis's own, and GitHub's published host keys pinned for reaching them.
+    assert bench.sh("stat -c '%U:%G %a' /var/lib/jarvis/notes").stdout == "jarvis:jarvis 700\n"
+    assert bench.sh("cmp /opt/jarvis/trust/github_known_hosts /etc/jarvis/trust/github_known_hosts && echo same").stdout == "same\n"
+    bench.sh("echo 'github.com ssh-ed25519 swapped' > /etc/jarvis/trust/github_known_hosts")
+    looked = bench.sh(CHECK)
+    assert looked.returncode == 1 and "github_known_hosts is not GitHub's host keys as this release records them" in looked.stdout
 
     # Again: the same authority and certificate, the service started anew with the code just installed.
     before = prints(bench, "ca"), prints(bench, "server")

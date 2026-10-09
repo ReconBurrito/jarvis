@@ -4,6 +4,8 @@ jarvis command and the service both start from here, so both are the same Jarvis
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from typing import Any
 
 import httpx
@@ -17,6 +19,10 @@ from .adapters.switch import SwitchSession, make_switch_tool
 from .audit import AuditLog
 from .config import Settings
 from .llm import OllamaBackend
+from .notes.repo import BrainRepo, is_ssh_remote
+from .notes.semantic import Embeddings
+from .notes.tools import make_notes_tools
+from .notes.write import make_note_write_tools
 from .router import Router
 from .tools import Tool, ToolRegistry, make_local_status
 from .vault import ERROR, LOCKED, NONE, UNLOCKED, Vault
@@ -30,6 +36,8 @@ SYSTEMS = (
     ("opnsense", "opnsense_", ("JARVIS_OPNSENSE_API_KEY", "JARVIS_OPNSENSE_API_SECRET", "JARVIS_OPNSENSE_HOSTS"), "opnsense.pem"),
     ("dns", "dns_", ("JARVIS_DNS_SERVERS", "JARVIS_DNS_LAB_NAME"), None),
     ("switch", "switch_", ("JARVIS_SWITCH_USER", "JARVIS_SWITCH_PASSWORD", "JARVIS_SWITCH_HOST"), "switch_known_hosts"),
+    # Jarvis's own notes: a git repository it reaches with a deploy key (base64 of the private key, or the key itself).
+    ("notes", "note", ("JARVIS_NOTES_REPO", "JARVIS_NOTES_DEPLOY_KEY"), "github_known_hosts"),
 )
 # Where each certificate comes from, for the sentence that says it is missing.
 TRUST_FROM = {
@@ -37,6 +45,7 @@ TRUST_FROM = {
     "pbs.pem": "the backup server's own certificate; copy it there",
     "opnsense.pem": "the firewall's own web certificate; copy it there",
     "switch_known_hosts": "the switch's SSH host key, as ssh-keyscan prints it; check it and put it there",
+    "github_known_hosts": "the installer puts GitHub's published host keys there",
 }
 
 
@@ -57,6 +66,9 @@ class Jarvis:
         self.lab: dict[str, str] = {}    # system: why it has no tools ("" when it has them)
         self._lab_http: list[httpx.AsyncClient] = []
         self._closing: list[httpx.AsyncClient] = []
+        self.notes: BrainRepo | None = None
+        self._old_notes: list[BrainRepo] = []
+        self._tasks: set[asyncio.Task] = set()
         self.backend = OllamaBackend(settings.ollama_url, settings.model, self.client) if settings.has_model else None
         self.router = Router(
             [self.backend] if self.backend else [], self.tools, self.audit, audit_text=settings.audit_text,
@@ -86,6 +98,11 @@ class Jarvis:
         retired, self._lab_http = self._lab_http, []
         for http in retired:
             self._retire(http)
+        if self.notes is not None:
+            # The old repository object lets its key go; a new one is made if the vault still names the notes.
+            self._old_notes.append(self.notes)
+            self._later(self._close_notes(self.notes))
+            self.notes = None
         lab: dict[str, str] = {}
         for system in SYSTEMS:
             why = self._system(*system)
@@ -110,6 +127,8 @@ class Jarvis:
         if missing:
             return "not in the vault: " + ", ".join(missing)
         cert = self.settings.trust_dir / trust if trust else None
+        if name == "notes" and not is_ssh_remote(self.vault.get(needs[0]).strip()):
+            cert = None   # a repository on this machine (a folder) is reached without a host key
         if cert is not None and not cert.is_file():
             return f"{cert} is missing ({TRUST_FROM[trust]})"
         value = self.vault.get
@@ -124,6 +143,8 @@ class Jarvis:
             elif name == "opnsense":
                 client = OpnsenseClient(hosts, value(needs[0]), value(needs[1]), cert)
                 tools = make_opnsense_tools(client)
+            elif name == "notes":
+                return self._notes(value(needs[0]).strip(), value(needs[1]), cert)
             elif name == "switch":
                 client = None
                 if len(hosts) != 1:
@@ -139,6 +160,49 @@ class Jarvis:
         for tool in tools:
             self.tools.register(tool)
         return ""
+
+    def _notes(self, remote: str, key: str, known_hosts) -> str:
+        """Gives Jarvis its notes: the repository is cloned or brought up to date in the background."""
+        raw = key.strip().encode()
+        if b"PRIVATE KEY-----" not in raw:
+            try:
+                raw = base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                return "cannot be set up: JARVIS_NOTES_DEPLOY_KEY is neither a private key nor one in base64"
+        if is_ssh_remote(remote) and b"PRIVATE KEY-----" not in raw:
+            return "cannot be set up: JARVIS_NOTES_DEPLOY_KEY does not hold a private key (a public key in its place?)"
+        repo = BrainRepo(self.settings.notes_dir / "repo", remote, raw, known_hosts,
+                         has_secret=self.vault.holds_secret)
+        model = self.settings.embed_model
+        embeddings = None if model == "none" else Embeddings(self.settings.ollama_url, model,
+                                                               self.settings.notes_dir / "vectors.json", self.client)
+        for tool in make_notes_tools(repo, embeddings) + make_note_write_tools(repo, self.audit):
+            self.tools.register(tool)
+        self.notes = repo
+        self._later(self._start_notes(repo))
+        return ""
+
+    async def _start_notes(self, repo: BrainRepo) -> None:
+        """Clones or refreshes the notes, and says in the lab's state whether that worked."""
+        await repo.start()
+        if repo is self.notes:
+            fresh = repo.ready and not repo.detail.startswith("local copy only")
+            self.lab["notes"] = "" if fresh else repo.detail
+
+    async def _close_notes(self, repo: BrainRepo) -> None:
+        await repo.close()
+        if repo in self._old_notes:
+            self._old_notes.remove(repo)
+
+    def _later(self, work) -> None:
+        """Runs work in the background when there is a loop to run it; a command run once starts it when used."""
+        try:
+            task = asyncio.get_running_loop().create_task(work)
+        except RuntimeError:
+            work.close()
+            return
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def _retire(self, http: httpx.AsyncClient) -> None:
         try:
@@ -161,6 +225,12 @@ class Jarvis:
         return [tool for tool in self.tools._tools.values() if tool.name != "local_status"]
 
     async def close(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for repo in self._old_notes + ([self.notes] if self.notes else []):
+            await repo.close()
         for http in self._lab_http + self._closing:
             await http.aclose()
         await self.client.aclose()

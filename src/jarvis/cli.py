@@ -250,6 +250,16 @@ async def doctor(settings: Settings, quick: bool, out: TextIO, client: httpx.Asy
         for system, why in jarvis.lab.items():
             if why and vault.status == "unlocked":
                 warn(f"{system}: no tools ({why})")
+            elif not why and system == "notes":
+                await jarvis.notes.start()
+                if not jarvis.notes.ready:
+                    (warn if release_check else fault)(f"notes: not available: {jarvis.notes.detail}")
+                    continue
+                found = await jarvis.tools.dispatch("doctor", "notes_search", {"query": "notes"}, audit=False)
+                how = found.get("search", "")
+                line = f"notes: {jarvis.notes.detail}, {len(jarvis.notes.notes())} notes; search by {how}"
+                fine = (how == "words and meaning" or settings.embed_model == "none") and not jarvis.notes.detail.startswith("local copy only")
+                (ok if fine else warn)(line)
             elif not why:
                 tool, summary = LAB_CHECKS[system]
                 reading = await jarvis.tools.dispatch("doctor", tool, {}, audit=False)

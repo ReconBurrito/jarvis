@@ -52,6 +52,7 @@ def _release(etc: Path) -> str:
 class Settings:
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "qwen3:8b"                  # as Ollama names it; "none" when no local model was asked for
+    embed_model: str = "qwen3-embedding:0.6b"  # for searching notes by meaning; "none" for words only
     data_dir: Path = Path("/var/lib/jarvis")
     audit_text: bool = False                 # keep what was said in the audit log, not only its length and fingerprint
     where: str = ""                          # the machine Jarvis runs on, in words, for its own description
@@ -74,6 +75,11 @@ class Settings:
     @property
     def audit_path(self) -> Path:
         return self.data_dir / "audit" / "audit.jsonl"
+
+    @property
+    def notes_dir(self) -> Path:
+        """The notes folder in Jarvis's state: the clone of the notes repository, and the vectors made from it."""
+        return self.data_dir / "notes"
 
     @property
     def has_model(self) -> bool:
@@ -136,6 +142,7 @@ class Settings:
             tls_dir=etc / "tls",
             ollama_url=url,
             model=get("JARVIS_LOCAL_MODEL", cls.model),
+            embed_model=get("JARVIS_EMBED_MODEL", cls.embed_model),
             data_dir=data_dir,
             audit_text=text in _TRUE,
             where=values.get("JARVIS_HOST_DESCRIPTION", "").strip(),

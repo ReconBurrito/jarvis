@@ -268,7 +268,7 @@ def test_the_panel_is_told_how_the_vault_and_the_cluster_stand(tmp_path):
 
     locked = run(state())
     assert locked["vault"]["status"] == "locked" and "jarvis-unlock" in locked["vault"]["detail"]
-    assert locked["lab"] == dict.fromkeys(("proxmox", "pbs", "opnsense", "dns", "switch"), "the vault is locked") and "cluster" not in locked["pulse"]
+    assert locked["lab"] == dict.fromkeys(("proxmox", "pbs", "opnsense", "dns", "switch", "notes"), "the vault is locked") and "cluster" not in locked["pulse"]
     unlock(config, key)
     assert jarvis.refresh() is True
     to_lab(jarvis)

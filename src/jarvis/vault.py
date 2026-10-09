@@ -33,6 +33,7 @@ PLAIN = ("_HOST", "_HOSTS", "_SERVERS", "_LAB_NAME")
 RETRY_AFTER = 30                   # seconds before a file that could not be read is tried again unchanged
 _NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _IDENTITY = re.compile(r"^AGE-SECRET-KEY-1[0-9A-Z]{58}$")
+_CREDENTIAL = re.compile(r"SECRET|PASSWORD|PASSWD|KEY|TOKEN")
 _RECIPIENT = re.compile(r"^sops_age__list_\d+__map_recipient=(age1[0-9a-z]{58})$", re.MULTILINE)
 # What sops's exit codes mean (sops' cmd/sops/codes), said in Jarvis's words.
 _SOPS_SAYS = {
@@ -237,6 +238,14 @@ class Vault:
             if len(value) >= MIN_MASKED and not name.endswith(PLAIN):
                 text = text.replace(value, f"[{name}]")
         return text
+
+    def holds_secret(self, text: str) -> bool:
+        """Whether the text holds a value of the vault that is a credential (not one that only names a place or an
+        account), so that it is never written anywhere."""
+        for name, value in self._values.items():
+            if len(value) >= MIN_MASKED and _CREDENTIAL.search(name) and not name.endswith("_ID") and value in text:
+                return True
+        return False
 
     def about(self) -> dict[str, object]:
         """What may be shown about the vault: its state, never a value."""
