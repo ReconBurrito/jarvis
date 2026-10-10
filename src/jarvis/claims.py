@@ -89,14 +89,15 @@ _CLAIMS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 # What stands behind which kind of claim: a tool that did the thing in this turn.
 _BACKED_BY = {
-    "write": lambda done: bool(done & {"note_add:done", "note_replace:done"}),
+    "write": lambda done: bool(done & {"note_add:done", "note_replace:done", "fs_write:done", "fs_delete:done", "fs_undo:done"}),
     "promise": lambda done: bool(done & {"note_add:proposed", "note_replace:proposed"}),
     "desktop": lambda done: bool(done & {"desktop_window:done", "desktop_arrange:done"}),
     "browse": lambda done: bool(done & {"web_browse:done", "web_research:done", "browser_open:done", "browser_read:done"}),
     "form": lambda done: bool(done & {"web_browse:done"}),
     "hands": lambda done: bool(done & {"web_browse:done"}),
     "action": lambda done: bool(done & {"note_add:done", "note_replace:done", "desktop_window:done", "desktop_arrange:done",
-                                         "note_add:proposed", "note_replace:proposed"}),
+                                         "note_add:proposed", "note_replace:proposed", "fs_write:done", "fs_mkdir:done",
+                                         "fs_delete:done", "fs_undo:done"}),
 }
 SAID_INSTEAD = {
     "write": "I have not written or changed anything: none of my tools reported it.",

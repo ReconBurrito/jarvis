@@ -19,6 +19,7 @@ from .adapters.switch import SwitchSession, make_switch_tool
 from .audit import AuditLog
 from .browser.door import Door
 from .browser.tools import Browser, make_browser_tools
+from .selffs.tools import SelfFiles, make_selffs_tools
 from .config import Settings
 from .llm import OllamaBackend
 from .notes.repo import BrainRepo, is_ssh_remote
@@ -62,12 +63,13 @@ class Jarvis:
         self.audit = AuditLog(settings.audit_path)
         self.vault = Vault(settings.env_dir, settings.secrets_mode, settings.identity, settings.sops,
                            watch=tuple(settings.trust_dir / trust for *_, trust in SYSTEMS if trust)
-                           + settings.door_files)
+                           + settings.door_files + (settings.fs_socket,))
         # Nothing a tool returns may carry a value of the vault on to the model.
         self.tools = ToolRegistry(self.audit, redact=lambda text: self.vault.mask(text))
         self.tools.register(make_local_status(settings.ollama_url, self.client))
         self.lab: dict[str, str] = {}    # system: why it has no tools ("" when it has them)
         self.browser = ""                # why Jarvis has no browser tools ("" when it has them, None when no desktop is set up)
+        self.files = False               # whether Jarvis has its own machine's files (jarvis-fsd is there)
         self._lab_http: list[httpx.AsyncClient] = []
         self._closing: list[httpx.AsyncClient] = []
         self.notes: BrainRepo | None = None
@@ -114,6 +116,7 @@ class Jarvis:
                 lab[system[0]] = why
         self.lab = lab
         self.browser = self._browser()
+        self.files = self._files()
         record: dict[str, Any] = {"status": self.vault.status, "files": self.vault.files, "values": len(self.vault.names()),
                                   "tools": [name for name in self.tools.names() if name != "local_status"]}
         if self.vault.status != UNLOCKED:
@@ -179,6 +182,15 @@ class Jarvis:
         for tool in make_browser_tools(Browser(door)):
             self.tools.register(tool)
         return ""
+
+    def _files(self) -> bool:
+        """Gives Jarvis its own machine's files when jarvis-fsd runs (its socket is there). No vault needed."""
+        self.tools.remove("fs_")
+        if not self.settings.fs_socket.is_socket():
+            return False
+        for tool in make_selffs_tools(SelfFiles(self.settings.fs_socket)):
+            self.tools.register(tool)
+        return True
 
     def _notes(self, remote: str, key: str, known_hosts) -> str:
         """Gives Jarvis its notes: the repository is cloned or brought up to date in the background."""

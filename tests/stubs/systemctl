@@ -43,6 +43,7 @@ case "$1" in
                 : > "$state/jarvis-running"
                 ;;
             jarvis-browser.service) : > "$state/keeper-running" ;;
+            jarvis-fs.service) [ ! -f "$state/fsd-wont-start" ] || exit 1; : > "$state/fsd-running" ;;
             jarvis-door.service)
                 [ ! -f "$state/door-wont-start" ] || exit 1
                 echo started >> "$state/door-starts"
@@ -58,6 +59,7 @@ case "$1" in
             jarvis.service) [ -f "$state/jarvis-running" ] ;;
             jarvis-door.service) [ -f "$state/door-running" ] ;;
             jarvis-browser.service) [ -f "$state/keeper-running" ] ;;
+            jarvis-fs.service) [ -f "$state/fsd-running" ] ;;
             *) exit 3 ;;
         esac
         ;;

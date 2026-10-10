@@ -65,6 +65,9 @@ TLS="$JARVIS_ETC/tls"
 FIREWALL_RULES="$JARVIS_ETC/brain.nft"
 FIREWALL=/etc/systemd/system/jarvis-firewall.service
 SERVICE=/etc/systemd/system/jarvis.service
+# jarvis-fsd: Jarvis's hands on this machine's files, as root, for the user jarvis alone (src/jarvis/selffs).
+FSD=/usr/local/sbin/jarvis-fsd
+FS_UNIT=/etc/systemd/system/jarvis-fs.service
 ALLOW="$(site_get JARVIS_PANEL_ALLOW)"
 [ -z "$ALLOW" ] || address_list_ok "$ALLOW" \
     || die "JARVIS_PANEL_ALLOW in $JARVIS_SITE must be addresses (or networks by their first address, no wider than /8) with commas between, not '$ALLOW'."
@@ -326,10 +329,22 @@ firewall_unit() {
         "ExecStart=/usr/sbin/nft -f $FIREWALL_RULES" "" "[Install]" "WantedBy=multi-user.target"
 }
 
+# Root, because the owner gave Jarvis its whole machine; it answers the user jarvis only, keeps keys and the vault out
+# of reach, and keeps a copy of what every change replaced (/var/lib/jarvis-fs) so each can be undone.
+fs_unit() {
+    printf '%s\n' "# Written by the Jarvis installer; changed by hand, it is overwritten at the next update." \
+        "[Unit]" "Description=Jarvis brain: Jarvis's hands on this machine's files (jarvis-fsd)" "Before=jarvis.service" "" \
+        "[Service]" "Type=simple" "ExecStart=/usr/bin/python3 -I $FSD --user jarvis --protect $ENV_DIR --protect $KEYS" \
+        "Restart=on-failure" "RestartSec=3" "UMask=0077" "LimitCORE=0" "" \
+        "[Install]" "WantedBy=multi-user.target"
+}
+
 service_unit() {
     printf '%s\n' "# Written by the Jarvis installer; changed by hand, it is overwritten at the next update." \
         "[Unit]" "Description=Jarvis" "After=network-online.target ollama.service jarvis-firewall.service" \
         "Wants=network-online.target" "Requires=jarvis-firewall.service" \
+        "# Jarvis reads and changes this machine's files through jarvis-fsd, as the owner chose." \
+        "Wants=jarvis-fs.service" "After=jarvis-fs.service" \
         "# A Jarvis that cannot start is not started over for ever." \
         "StartLimitIntervalSec=120" "StartLimitBurst=5" "" \
         "[Service]" "Type=simple" "User=jarvis" "Group=jarvis" "WorkingDirectory=/" \
@@ -337,7 +352,8 @@ service_unit() {
         "ExecCondition=/usr/bin/test -f $JARVIS_CHECKOUT/src/jarvis/server.py" \
         "ExecStart=$VENVS/current/bin/python -I -m jarvis serve" \
         "Restart=on-failure" "RestartSec=3" "TimeoutStopSec=15" \
-        "# Jarvis can write its audit log and nothing else on this system." \
+        "# The service itself writes its audit log and its notes and nothing else; other files it changes only" \
+        "# through jarvis-fsd (jarvis-fs.service), which keeps keys, the vault and its own guards out of reach." \
         "# It holds the vault's values in memory: a crash never writes that memory to the disk." \
         "LimitCORE=0" \
         "NoNewPrivileges=true" "ProtectSystem=strict" "ProtectHome=read-only" "PrivateTmp=true" \
@@ -474,11 +490,15 @@ apply_service() {
     chmod 0644 "$FIREWALL_RULES.new"
     mv -f "$FIREWALL_RULES.new" "$FIREWALL_RULES"
     firewall_unit | write_file "$FIREWALL" 0644
+    install_command "$JARVIS_CHECKOUT/src/jarvis/selffs/daemon.py" "$FSD"
+    fs_unit | write_file "$FS_UNIT" 0644
     service_unit | write_file "$SERVICE" 0644
     systemctl daemon-reload
     systemctl enable jarvis-firewall.service >/dev/null 2>&1 \
         || die "the firewall could not be set to load at start. See: systemctl status jarvis-firewall"
     nft -f "$FIREWALL_RULES" || die "the firewall rules could not be loaded."
+    systemctl enable jarvis-fs.service >/dev/null 2>&1 || die "jarvis-fsd could not be set to start at boot. See: systemctl status jarvis-fs"
+    systemctl restart jarvis-fs.service || die "jarvis-fsd does not start. See: journalctl -u jarvis-fs"
     systemctl enable jarvis.service >/dev/null 2>&1 || die "Jarvis could not be set to start at boot. See: systemctl status jarvis"
     # Always started anew: the code it runs has just been put in place. A service that does not come up is
     # switched off again, so that a container which goes back a release is not left with it trying.
@@ -634,6 +654,10 @@ check() {
     firewall_rules | cmp -s - "$FIREWALL_RULES" || wrong+=("$FIREWALL_RULES is not what the settings ask for")
     firewall_unit | cmp -s - "$FIREWALL" || wrong+=("$FIREWALL is not the one of this release")
     service_unit | cmp -s - "$SERVICE" || wrong+=("$SERVICE is not the one of this release")
+    cmp -s "$JARVIS_CHECKOUT/src/jarvis/selffs/daemon.py" "$FSD" || wrong+=("$FSD is not the one of this release")
+    fs_unit | cmp -s - "$FS_UNIT" || wrong+=("$FS_UNIT is not the one of this release")
+    [ "$(systemctl is-enabled jarvis-fs.service 2>/dev/null)" = "enabled" ] || wrong+=("jarvis-fsd is not set to start at boot")
+    systemctl is-active --quiet jarvis-fs.service || wrong+=("jarvis-fsd is not running (see: journalctl -u jarvis-fs)")
     [ "$(systemctl is-enabled jarvis-firewall.service 2>/dev/null)" = "enabled" ] || wrong+=("the firewall is not set to load at start")
     [ "$(systemctl is-enabled jarvis.service 2>/dev/null)" = "enabled" ] || wrong+=("Jarvis is not set to start at boot")
     if [ "${#wrong[@]}" -eq 0 ]; then

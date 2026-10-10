@@ -26,6 +26,10 @@ _CAN = (
     (("desktop_",), "open, close, move and arrange the windows on the owner's desktop"),
     (("browser_",), "see which tabs are open in the web browser on the owner's desktop, open a web page there "
                     "(browser_open) and read the text of a page that is open (browser_read)"),
+    (("fs_",), "read and change the files of the machine you run on, yourself included (fs_list, fs_read, fs_find, "
+               "fs_write, fs_mkdir, fs_delete), and undo such a change (fs_changes, fs_undo); keys and the vault are kept "
+               "from you, and a change to a service's files takes effect only when that service is restarted, which "
+               "you cannot do"),
 )
 # (tools that would give the ability, what you cannot do while none of them is there)
 _CANNOT = (

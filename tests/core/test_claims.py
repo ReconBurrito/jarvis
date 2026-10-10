@@ -208,3 +208,14 @@ def test_jarvis_is_told_what_the_browser_tools_can_and_cannot_do():
     assert "open a web page there (browser_open)" in said and "click, type, scroll or sign in on a web page" in said
     assert "look anything up on the internet" not in said.split("What you cannot do:")[1]
     assert "look anything up on the internet" in describe(["local_status"])
+
+
+def test_a_change_to_its_own_files_backs_a_claim_of_writing():
+    made = Claims(["fs_write", "fs_undo"])
+    assert made.unbacked("It has been saved.") == "write"
+    made.tool("fs_write", {"error": "/etc/shadow is kept from Jarvis"})
+    assert made.unbacked("It has been saved.") == "write", "a refused write backs nothing"
+    made.tool("fs_write", {"done": True, "path": "/etc/jarvis/notes.md", "change": "00000001"})
+    assert made.unbacked("It has been saved.") is None and made.unbacked("Done, the change is made.") is None
+    said = describe(["local_status", "fs_read", "fs_write"])
+    assert "read and change the files of the machine you run on" in said and "keys and the vault are kept from you" in said

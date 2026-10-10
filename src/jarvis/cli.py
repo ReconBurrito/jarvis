@@ -277,6 +277,14 @@ async def doctor(settings: Settings, quick: bool, out: TextIO, client: httpx.Asy
             else:
                 count = len(tabs["tabs"])
                 ok(f"browser: the door to the desktop's browser answers, {count} tab{'' if count == 1 else 's'} open")
+        # Jarvis's own files, through jarvis-fsd. (When jarvis-fsd is not running Jarvis has no such tools, and the
+        # installer's check names it.)
+        if jarvis.files:
+            listed = await jarvis.tools.dispatch("doctor", "fs_list", {"path": "/etc/jarvis"}, audit=False)
+            if "error" in listed:
+                (warn if release_check else fault)(f"files: jarvis-fsd does not answer: {listed['error']}")
+            else:
+                ok("files: Jarvis reads and changes its own machine's files through jarvis-fsd")
         if jarvis.backend is None:
             ok(f"no local model is set (JARVIS_LOCAL_MODEL=none in {settings.site}); Jarvis cannot answer until one is")
             return 1 if faults else 0

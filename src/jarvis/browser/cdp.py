@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 from .door import Door, DoorError
 
 CALL_TIMEOUT = 20
+DRAIN_ROUNDS = 20       # letting go of a tab: how long requests still arriving are refused (rounds of DRAIN_PAUSE)
+DRAIN_PAUSE = 0.05
 
 
 class CdpError(Exception):
@@ -270,6 +272,19 @@ class Hold:
                 with contextlib.suppress(CdpError):
                     await self.cdp.call("Target.setAutoAttach", {"autoAttach": False, "waitForDebuggerOnStart": False},
                                         self.session, timeout=5)
+                # Requests still on their way to Jarvis are refused as they come, until the page has been quiet
+                # for a moment: lifting the guard lets through whatever it still holds. (A second at most.)
+                quiet = 0
+                for _ in range(DRAIN_ROUNDS):
+                    late, self._late = self._late, []
+                    if late:
+                        await asyncio.gather(*late, return_exceptions=True)
+                        quiet = 0
+                    else:
+                        quiet += 1
+                        if quiet >= 3:
+                            break
+                    await asyncio.sleep(DRAIN_PAUSE)
                 await asyncio.gather(*self._late, return_exceptions=True)
                 for session in sorted(self.sessions - {self.session}):
                     with contextlib.suppress(CdpError):

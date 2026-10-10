@@ -18,7 +18,8 @@ Under construction. So far: the installers, the update command, the desktop (the
 with Jarvis's browser), the local model on the brain's GPU, Jarvis's core, and Jarvis's panel on the
 desktop, where you talk to it, its vault, and read-only tools for Proxmox, Proxmox Backup Server, OPNsense and
 the DNS servers and the switch, its own notes, which it searches by words and by meaning and writes to, and
-the browser on the desktop, where it opens and reads web pages. The
+the browser on the desktop, where it opens and reads web pages, and its own machine's files, which it reads and
+changes. The
 voice arrives in the releases that follow. A full guide with pictures comes with the first complete release.
 
 
@@ -254,7 +255,8 @@ How the brain reaches that browser, and who else cannot:
    or reads a page, every request of that tab and of its frames and workers, redirects included, goes through
    Jarvis first and is stopped unless it is for a public address, and Jarvis says what it stopped. This is the
    second line; the firewall is the first, and it also covers what this one does not see (WebSockets, shared
-   workers, and everything the page does after Jarvis lets go).
+   workers, now and then a worker started by a frame of another site, and everything the page does after Jarvis
+   lets go).
 
 What this does not cover:
 
@@ -268,6 +270,37 @@ What this does not cover:
 4. Jarvis's browser shows its windows on the same screen as the panel. Its pages run in Chromium's sandbox; a page
    that broke out of it could see and type into the desktop's other windows. `jarvis doctor` says whether the
 door answers.
+
+## Jarvis's own files
+
+Jarvis can read and change the files of its own machine, the brain, so that it can look at and configure
+itself: `fs_list`, `fs_read`, `fs_find`, `fs_write`, `fs_mkdir` and `fs_delete`, and `fs_changes` and `fs_undo`
+to see and take back what it changed. They work through `jarvis-fsd` (`src/jarvis/selffs/daemon.py`, the
+service `jarvis-fs`), which runs as root and answers the user `jarvis` alone, on a socket in `/run/jarvis-fs`.
+
+1. Kept out of reach, for reading and for writing: the brain's private keys, the vault (the `.env` folder and
+   the vault identity, sealed and unlocked), the system's password files and SSH keys, `jarvis-fsd`'s own
+   history, and `/proc`, `/sys` and `/dev`. A file that holds a private key is not read or changed wherever it
+   is, and no key is written.
+2. Every change keeps a copy of what it replaced in `/var/lib/jarvis-fs` (root only; the last thousand), so each
+   can be undone, newest first. A file larger than 8 MB is not changed, since no copy of it would be kept.
+3. A write replaces the whole file at once, keeps its owner and mode, and can name the version it was read as,
+   so a change made meanwhile is not lost. Set-user and set-group modes are not given out.
+4. Every call is in the audit log; what a write holds is kept there as its length and fingerprint only.
+5. Jarvis cannot run commands or restart services: a change to a service's files takes effect when that
+   service restarts. Files the installer writes are written again at the next update.
+
+6. Read but never changed: what keeps these guards in place, so that no write can switch them off at the next
+   restart or update. That is Jarvis's code and Python environment, `jarvis-fsd` and the units that start it and
+   Jarvis, Jarvis's commands, sops, the site settings, the release keys and pinned certificates, and the audit
+   log. (Code changes would not last anyway: an update puts the signed release back.) A protected file is known
+   by its place and by its inode, so a link, a hard link or a bind mount does not lead around it.
+
+What this does not cover: whatever Jarvis is told to change, it changes. That includes the files that decide
+who may reach the brain, so a change can cut off the panel until it is undone (`fs_undo`) or put right by hand
+(`update --repair` writes the installer's own files again). It also includes files that make something run as
+root, such as other systemd units, cron jobs and root's shell startup files: a change there can, at the next
+start, undo any guard above. Treat a request to change such a file as you would giving Jarvis root.
 
 ## Talking to Jarvis in a terminal
 

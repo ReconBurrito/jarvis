@@ -61,6 +61,13 @@ def test_install_makes_the_certificates_the_rule_and_the_unit_and_starts_jarvis(
                  "After=network-online.target ollama.service jarvis-firewall.service", "WantedBy=multi-user.target"):
         assert line + "\n" in unit, line
     assert "Before=network-pre.target jarvis.service shutdown.target\n" in bench.read("/etc/systemd/system/jarvis-firewall.service")
+    # jarvis-fsd: Jarvis's hands on its own machine's files, as the owner chose.
+    assert "Wants=jarvis-fs.service\nAfter=jarvis-fs.service\n" in unit
+    fsd = bench.read("/etc/systemd/system/jarvis-fs.service")
+    assert "ExecStart=/usr/bin/python3 -I /usr/local/sbin/jarvis-fsd --user jarvis --protect /etc/jarvis/secrets --protect /var/lib/jarvis-key\n" in fsd
+    assert "Before=jarvis.service\n" in fsd and "UMask=0077\n" in fsd
+    assert bench.sh("cmp /opt/jarvis/src/jarvis/selffs/daemon.py /usr/local/sbin/jarvis-fsd && echo same").stdout == "same\n"
+    assert "jarvis-fs.service" in state(bench, "enabled").split() and (bench.state / "fsd-running").exists()
     assert {"jarvis-firewall.service", "jarvis.service"} <= set(state(bench, "enabled").split())
     assert state(bench, "jarvis-starts") == "started\n"
     assert bench.sh(CHECK).returncode == 0
@@ -149,6 +156,8 @@ def test_certificates_are_renewed_in_time_and_what_is_wrong_with_them_is_noticed
         ("echo '# changed' >> /etc/jarvis/brain.nft", "/etc/jarvis/brain.nft is not what the settings ask for"),
         (f"rm {bench.state}/nft-loaded-brain", "the firewall table jarvis_brain is not loaded"),
         (f"rm {bench.state}/jarvis-running", "Jarvis's service is not running"),
+        (f"rm {bench.state}/fsd-running", "jarvis-fsd is not running"),
+        ("echo '# changed' >> /usr/local/sbin/jarvis-fsd", "/usr/local/sbin/jarvis-fsd is not the one of this release"),
         (f"touch {bench.state}/jarvis-silent", f"Jarvis's service does not answer on https://{ADDRESS}:8443"),
     ):
         assert bench.sh(break_it).returncode == 0, break_it

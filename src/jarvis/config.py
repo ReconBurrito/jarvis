@@ -71,6 +71,7 @@ class Settings:
     identity: Path = Path("/run/jarvis/age.key")   # the unlocked age identity, in memory-backed /run
     sops: str = "/usr/local/bin/sops"
     trust_dir: Path = Path("/etc/jarvis/trust")    # certificates of the lab's systems, put there by the installer
+    fs_socket: Path = Path("/run/jarvis-fs/socket")   # jarvis-fsd, Jarvis's hands on its own machine's files
 
     @property
     def audit_path(self) -> Path:
