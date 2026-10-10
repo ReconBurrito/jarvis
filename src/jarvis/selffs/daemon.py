@@ -114,7 +114,7 @@ class Files:
         if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or len(path) > 4096:
             raise Refused("give a full path, starting with /")
         real = os.path.realpath(os.path.join(self.root, path.lstrip("/")))
-        if real != self.root and not real.startswith(self.root + os.sep):
+        if real != self.root and not real.startswith(self.root.rstrip(os.sep) + os.sep):   # the root "/" included
             raise Refused(f"{path} leads outside this machine's files")
         if must_exist and not os.path.lexists(real):
             raise Refused(f"{path} does not exist")

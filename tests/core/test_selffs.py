@@ -249,3 +249,16 @@ def test_a_change_undone_after_its_place_was_kept_is_not_made(machine, tmp_path)
     assert later.handle({"op": "nonsense"}) == {"error": "unknown request 'nonsense'"}
     assert "error" in later.handle({"op": "read", "path": "/opt/app/notes.txt", "offset": float("inf")})
     assert "error" in later.handle({"op": "undo", "change": "9" * 5000})
+
+
+def test_on_the_real_root_every_full_path_is_inside(tmp_path):
+    """jarvis-fsd runs with --root / on the brain: a path such as /etc/jarvis must not count as outside it."""
+    real = tmp_path / "real.txt"
+    real.write_text("on the real disk\n")
+    files = Files("/", str(tmp_path / "history"))
+    assert files.handle({"op": "read", "path": str(real)})["text"] == "on the real disk\n"
+    assert files.handle({"op": "list", "path": str(tmp_path)})["path"] == str(tmp_path)
+    assert "kept from Jarvis" in files.handle({"op": "read", "path": "/etc/shadow"})["error"]
+    assert "kept from Jarvis" in files.handle({"op": "read", "path": "/proc/self/environ"})["error"]
+    wrote = files.handle({"op": "write", "path": str(tmp_path / "new.txt"), "content": "x\n"})
+    assert wrote["done"] and files.handle({"op": "undo", "change": wrote["change"]})["done"]
