@@ -127,9 +127,15 @@ class Jarvis:
     def _system(self, name: str, prefix: str, needs: tuple[str, ...], trust: str | None) -> str | None:
         """Gives Jarvis one system's tools when it can. "" when it did, why not when it did not, None when the
         vault does not mention the system at all."""
+        if name == "notes" and self.settings.notes_local and self.vault.status in (UNLOCKED, NONE) \
+                and not any(self.vault.get(need) for need in needs):
+            # No notes repository in the vault: Jarvis keeps its notes on this machine (JARVIS_NOTES_LOCAL).
+            return self._notes("", "", None)
         if self.vault.status != UNLOCKED:
             return "the vault is locked" if self.vault.status == LOCKED else "the vault cannot be read"
         missing = [need for need in needs if not self.vault.get(need)]
+        if name == "notes" and needs[0] not in missing and not is_ssh_remote(self.vault.get(needs[0]).strip()):
+            missing = [need for need in missing if need != needs[1]]   # a folder on this machine needs no key
         if len(missing) == len(needs):
             return None
         if missing:
@@ -193,17 +199,18 @@ class Jarvis:
         return True
 
     def _notes(self, remote: str, key: str, known_hosts) -> str:
-        """Gives Jarvis its notes: the repository is cloned or brought up to date in the background."""
-        raw = key.strip().encode()
-        if b"PRIVATE KEY-----" not in raw:
+        """Gives Jarvis its notes: the repository is cloned or brought up to date in the background. With no remote,
+        the notes are kept on this machine only."""
+        raw = key.strip().encode() if is_ssh_remote(remote) else b""   # a folder on this machine needs no key
+        if raw and b"PRIVATE KEY-----" not in raw:
             try:
                 raw = base64.b64decode(raw, validate=True)
             except (binascii.Error, ValueError):
                 return "cannot be set up: JARVIS_NOTES_DEPLOY_KEY is neither a private key nor one in base64"
         if is_ssh_remote(remote) and b"PRIVATE KEY-----" not in raw:
             return "cannot be set up: JARVIS_NOTES_DEPLOY_KEY does not hold a private key (a public key in its place?)"
-        repo = BrainRepo(self.settings.notes_dir / "repo", remote, raw, known_hosts,
-                         has_secret=self.vault.holds_secret)
+        repo = BrainRepo(self.settings.notes_dir / "repo", remote, raw if remote else b"", known_hosts,
+                         has_secret=self.vault.holds_secret, local=not remote)
         model = self.settings.embed_model
         embeddings = None if model == "none" else Embeddings(self.settings.ollama_url, model,
                                                                self.settings.notes_dir / "vectors.json", self.client)

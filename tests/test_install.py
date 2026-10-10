@@ -37,7 +37,7 @@ def test_brain_unattended_asks_nothing_and_installs_the_signed_release(bench):
         "JARVIS_ROLE=brain", "JARVIS_REPO_URL=https://github.com/test/jarvis.git", "JARVIS_RELEASE_CHANNEL=signed",
         "JARVIS_RELEASE_BRANCH=main", "JARVIS_ENV_DIR=/srv/jarvis/env", "JARVIS_SECRETS_MODE=sops",
         "JARVIS_LOCAL_MODEL=qwen3:8b", "JARVIS_EMBED_MODEL=qwen3-embedding:0.6b", "JARVIS_PANEL_ALLOW=",
-        f"JARVIS_ADDRESS={ADDRESS}"}
+        f"JARVIS_ADDRESS={ADDRESS}", "JARVIS_NOTES_LOCAL=on"}
     facts = bench.sh("""
         sed -n 's/^name=//p' /etc/jarvis/release
         cat /etc/jarvis/release.floor
@@ -551,7 +551,7 @@ def test_a_first_run_that_stopped_early_has_still_handed_over_its_settings(bench
         "JARVIS_ROLE=brain", "JARVIS_REPO_URL=https://github.com/test/jarvis.git", "JARVIS_RELEASE_CHANNEL=signed",
         "JARVIS_RELEASE_BRANCH=main", "JARVIS_ENV_DIR=/srv/keys", "JARVIS_SECRETS_MODE=sops",
         "JARVIS_LOCAL_MODEL=qwen3:8b", "JARVIS_EMBED_MODEL=qwen3-embedding:0.6b", "JARVIS_PANEL_ALLOW=",
-        f"JARVIS_ADDRESS={ADDRESS}"}
+        f"JARVIS_ADDRESS={ADDRESS}", "JARVIS_NOTES_LOCAL=on"}
     assert bench.version() == "v0.1.0" and bench.sh("stat -c '%U:%G %a' /srv/keys").stdout == "root:jarvis 750\n"
 
 

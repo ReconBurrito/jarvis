@@ -55,6 +55,7 @@ class Settings:
     embed_model: str = "qwen3-embedding:0.6b"  # for searching notes by meaning; "none" for words only
     data_dir: Path = Path("/var/lib/jarvis")
     audit_text: bool = False                 # keep what was said in the audit log, not only its length and fingerprint
+    notes_local: bool = False                # with no notes repository in the vault, keep notes in a repository on this machine
     where: str = ""                          # the machine Jarvis runs on, in words, for its own description
     release: str = ""                        # the installed release, as the installer recorded it
     installing: bool = False                 # a release is being installed right now; the record is the one before
@@ -115,6 +116,9 @@ class Settings:
         data_dir = Path(get("JARVIS_DATA_DIR", str(cls.data_dir)))
         if not data_dir.is_absolute():
             raise SettingsError(f"JARVIS_DATA_DIR must be a full path, not '{data_dir}'.")
+        local = values.get("JARVIS_NOTES_LOCAL", "").strip().lower()
+        if local not in _TRUE | _FALSE:
+            raise SettingsError(f"JARVIS_NOTES_LOCAL must be on or off, not '{local}'.")
         text = values.get("JARVIS_AUDIT_TEXT", "").strip().lower()
         if text not in _TRUE | _FALSE:
             raise SettingsError(f"JARVIS_AUDIT_TEXT must be on or off, not '{text}'.")
@@ -153,6 +157,7 @@ class Settings:
             embed_model=get("JARVIS_EMBED_MODEL", cls.embed_model),
             data_dir=data_dir,
             audit_text=text in _TRUE,
+            notes_local=local in _TRUE,
             where=values.get("JARVIS_HOST_DESCRIPTION", "").strip(),
             release=_release(etc),
             installing=(etc / "release.pending").exists(),

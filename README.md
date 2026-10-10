@@ -180,6 +180,27 @@ embedding model) and `notes_read`, naming the note it used. When you ask it to w
 4. Text that looks like a secret, or holds a value of the vault, is never written.
 5. The audit log records which note changed and the commit, never the text.
 
+Where the notes are kept, one of three ways:
+
+1. **On the brain only** (the default). With no notes repository in the vault, Jarvis keeps its notes in a git
+   repository in `/var/lib/jarvis/notes/repo` and begins it with a first note when there is none. Nothing leaves
+   the brain; the notes are as safe as the brain's backups. The installer sets `JARVIS_NOTES_LOCAL=on` in
+   `/etc/jarvis/site.env`; set it to `off` for no notes at all.
+2. **In a private repository of your own on GitHub** (or any git server over SSH). Make an empty private
+   repository, make a deploy key for it with write access, and put two lines in the vault:
+   `JARVIS_NOTES_REPO=git@github.com:YOU/REPO.git` and `JARVIS_NOTES_DEPLOY_KEY=` followed by the private key file
+   in base64 (`base64 -w0 keyfile`, or `[Convert]::ToBase64String([IO.File]::ReadAllBytes("keyfile"))` in
+   PowerShell). GitHub's host keys are pinned already. An empty repository is given the first note; notes Jarvis
+   kept on the brain until then move there, history and all, as long as the repository is still empty. Never use
+   a public repository: the notes describe your lab and you.
+3. **In a git repository in a folder on the brain** that you manage yourself, such as a bare repository at
+   `/var/lib/jarvis/notes/origin.git`, made as the user jarvis (Jarvis's service may write only under
+   `/var/lib/jarvis/notes`, and git does not use a repository another user owns):
+   `runuser -u jarvis -- git init --bare -b main /var/lib/jarvis/notes/origin.git`, then
+   `JARVIS_NOTES_REPO=/var/lib/jarvis/notes/origin.git` in the vault, no key needed.
+
+`jarvis doctor` says which of these is in use and whether it works.
+
 The **Notes** link at the foot of the panel opens the notes in a window of their own: a shelf of notes (the standing
 files first, then each folder, with a filter), the note as it reads, and Edit to change its text. A link from one
 note to another opens it there. Saving (the button, or Ctrl+S) commits on main in the name "Owner", with Jarvis as

@@ -535,6 +535,8 @@ apply() {
         || die "$STATE/notes is not a folder (a link or a file is in its place). It was left as it is; look at it and move it away."
     install -d -m 0700 -o jarvis -g jarvis "$STATE/notes"
     [ -n "$(site_get JARVIS_HOST_DESCRIPTION)" ] || site_set JARVIS_HOST_DESCRIPTION "$(describe_host)"
+    # Notes from the start: with no notes repository in the vault, Jarvis keeps them on this machine (see the README).
+    [ -n "$(site_get JARVIS_NOTES_LOCAL)" ] || site_set JARVIS_NOTES_LOCAL on
     # Jarvis reads its .env files and never writes them; only root can change what is in here.
     env_dir_ok "$ENV_DIR" || die "$ENV_DIR cannot be the folder for the .env files (JARVIS_ENV_DIR in $JARVIS_SITE)."
     [ "$(readlink -m "$ENV_DIR")" = "$ENV_DIR" ] || die "$ENV_DIR leads elsewhere through a link; name the real folder."

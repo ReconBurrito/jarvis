@@ -35,6 +35,15 @@ AUTHOR = ("-c", "user.name=Jarvis", "-c", "user.email=jarvis@localhost")
 SSH_REMOTE = re.compile(r"^(?:[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~-]+|ssh://[A-Za-z0-9._@:/~-]+)$")
 
 
+FIRST_NOTE = """# Jarvis's notes
+
+What Jarvis knows and keeps. Jarvis searches and reads these notes, and adds to them when you ask it to. The
+standing files (SOUL.md, MEMORY.md, USER.md, HEARTBEAT.md, SCHEMA.md) and everything under skills/ shape how it
+behaves, so Jarvis changes them only through a proposal branch that you merge. You can edit any note in the Notes
+window of Jarvis's panel.
+"""
+
+
 class BrainError(RuntimeError):
     pass
 
@@ -55,12 +64,14 @@ class BrainRepo:
         deploy_key: bytes = b"",
         known_hosts: Path | None = None,
         has_secret: Callable[[str], bool] | None = None,
+        local: bool = False,
     ):
         self.path = path
         self.remote = remote
         self._key = deploy_key
         self._known_hosts = known_hosts
         self._has_secret = has_secret or (lambda text: False)
+        self.local = local   # with no remote: notes kept on this machine only, made when there are none yet
         self._lock = asyncio.Lock()
         self._agent = KeyAgent()
         self._env: dict[str, str] | None = None
@@ -167,35 +178,62 @@ class BrainRepo:
             return False
 
     async def start(self) -> None:
-        """Clone the notes if they are not here yet, otherwise bring them up to date. Never raises."""
+        """Clone the notes if they are not here yet, otherwise bring them up to date. Never raises.
+
+        An empty repository on the remote is given its first note and used. Notes kept on this machine only (no
+        remote) are made when there are none yet, and move to a remote named later when that remote is still empty."""
         if self._closed:
             return
         async with self._locked():
             try:
                 self._env = await self._prepare_env()
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                for left in (*self.path.parent.glob(".begin-*"), *self.path.parent.glob(".clone-*")):
+                    await asyncio.to_thread(_remove, left)   # what a start cut short left beside the notes
                 if (self.path / ".git").is_dir():
+                    if not self.remote and self.local and await self._git("config", "--get", "remote.origin.url", check=False):
+                        self.status, self.detail = FAILED, (
+                            f"{self.path} is a clone of a notes repository the vault no longer names, so it is not used as "
+                            f"notes kept on this machine; name it in the vault again, or move it away")
+                        return
                     if self.remote:
                         url = await self._git("config", "--get", "remote.origin.url", check=False)
-                        if url != self.remote:
+                        if not url:
+                            if not await self._remote_empty():
+                                self.status, self.detail = FAILED, (
+                                    f"{self.path} holds notes kept on this machine, and JARVIS_NOTES_REPO already has "
+                                    f"notes of its own; move {self.path} away to use those, or empty that repository")
+                                return
+                            # Sent by address first: until it is there, no origin is set, so a push that fails leaves
+                            # the notes as they were and the next start looks at the remote afresh.
+                            await self._git("push", "--", self.remote, "main:main")
+                            await self._git("remote", "add", "origin", self.remote)
+                            await self._git("fetch", "-q", "origin", "main")
+                        elif url != self.remote:
                             self.status, self.detail = FAILED, (
                                 f"{self.path} holds a clone of another repository than JARVIS_NOTES_REPO names, so it is "
                                 f"neither read nor written; move it away and Jarvis clones the one named")
                             return
-                        await self._git("pull", "--ff-only", "origin", "main")
+                        else:
+                            await self._pull(rebase=False)
                 elif self.remote:
-                    # Cloned beside its place and moved in when whole, so a clone cut short is never taken for one.
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
-                    scratch = Path(tempfile.mkdtemp(prefix=".clone-", dir=self.path.parent))
-                    try:
-                        await self._git("clone", "--branch", "main", "--", self.remote, str(scratch / "repo"), cwd=self.path.parent)
-                        os.rename(scratch / "repo", self.path)
-                    finally:
-                        await asyncio.to_thread(_remove, scratch)
+                    if await self._remote_empty():
+                        await self._begin(push=True)
+                    else:
+                        # Cloned beside its place and moved in when whole, so a clone cut short is never taken for one.
+                        scratch = Path(tempfile.mkdtemp(prefix=".clone-", dir=self.path.parent))
+                        try:
+                            await self._git("clone", "--branch", "main", "--", self.remote, str(scratch / "repo"), cwd=self.path.parent)
+                            os.rename(scratch / "repo", self.path)
+                        finally:
+                            await asyncio.to_thread(_remove, scratch)
+                elif self.local:
+                    await self._begin(push=False)
                 else:
                     self.status, self.detail = OFF, "no notes repository is set up"
                     return
                 head = await self._git("rev-parse", "--short", "HEAD")
-                self.status, self.detail = READY, f"main at {head}"
+                self.status, self.detail = READY, f"main at {head}" + ("" if self.remote else " (kept on this machine only)")
             except (BrainError, OSError) as exc:
                 if (self.path / ".git").is_dir() and not self._closed:
                     # The local copy is still good for reading; say why it could not be refreshed.
@@ -204,6 +242,44 @@ class BrainRepo:
                     self.status, self.detail = READY, f"local copy only: {exc}"[:200]
                 else:
                     self.status, self.detail = FAILED, str(exc)[:200]
+
+    async def _pull(self, rebase: bool) -> None:
+        """Bring main up to date with the remote. Two histories with nothing in common are never mixed."""
+        await self._git("fetch", "-q", "origin", "main")
+        if not await self._git_ok("merge-base", "HEAD", "FETCH_HEAD"):
+            raise BrainError("the notes here and the notes on the remote have no history in common, so they are not "
+                             "mixed; move one of them away")
+        if rebase:
+            await self._git("rebase", "-q", "FETCH_HEAD")
+        else:
+            await self._git("merge", "-q", "--ff-only", "FETCH_HEAD")
+
+    async def _remote_empty(self) -> bool:
+        """Whether the remote has no branches at all (a repository just made). One without main is an error."""
+        heads = await self._git("ls-remote", "--heads", "--", self.remote, cwd=self.path.parent)
+        if not heads:
+            return True
+        if not re.search(r"\trefs/heads/main$", heads, re.M):
+            raise BrainError("JARVIS_NOTES_REPO has no branch main; Jarvis keeps its notes on main")
+        return False
+
+    async def _begin(self, push: bool) -> None:
+        """The notes' first commit, made beside their place and moved in when whole; sent to the remote when there
+        is one (which is then empty)."""
+        scratch = Path(tempfile.mkdtemp(prefix=".begin-", dir=self.path.parent))
+        try:
+            repo = scratch / "repo"
+            repo.mkdir()
+            await self._git("init", "-q", "-b", "main", cwd=repo)
+            (repo / "README.md").write_text(FIRST_NOTE, encoding="utf-8")
+            await self._git("add", "README.md", cwd=repo)
+            await self._git("commit", "-q", "-m", "Jarvis's notes begin", cwd=repo)
+            if push:
+                await self._git("remote", "add", "origin", self.remote, cwd=repo)
+                await self._git("push", "-u", "origin", "main", cwd=repo)
+            os.rename(repo, self.path)
+        finally:
+            await asyncio.to_thread(_remove, scratch)
 
     # ---- reading -------------------------------------------------------------------------------
 
@@ -296,7 +372,7 @@ class BrainRepo:
             await self._git("commit", "-m", message, "--", *files)
             if self.can_push:
                 try:
-                    await self._git("pull", "--rebase", "origin", "main")
+                    await self._pull(rebase=True)
                     await self._git("push", "origin", "main")
                 except BrainError:
                     await self._git("rebase", "--abort", check=False)  # the commit stays here; never a half-done rebase
@@ -313,7 +389,7 @@ class BrainRepo:
         if not self.can_push:
             return
         try:
-            await self._git("pull", "--rebase", "origin", "main")
+            await self._pull(rebase=True)
         except BrainError as exc:
             await self._git("rebase", "--abort", check=False)
             raise BrainError(f"the notes could not be brought up to date with GitHub, so nothing was changed: {exc}") from None
@@ -457,7 +533,7 @@ class BrainRepo:
                     await self._git("commit", f"--author={author} <owner@jarvis.invalid>", "-m", message, "--", *files)
                     if self.can_push:
                         stage = "sent"
-                        await self._git("pull", "--rebase", "origin", "main")
+                        await self._pull(rebase=True)
                         await self._git("push", "origin", "main")
             except (BrainError, OSError) as exc:
                 await self._git("rebase", "--abort", check=False)

@@ -301,3 +301,135 @@ def test_any_user_at_host_remote_is_reached_over_ssh(tmp_path):
         assert is_ssh_remote(remote), remote
     for remote in ("/srv/notes.git", "notes.git", "github.com:you/notes.git", "ext::sh -c id", "https://example.org/n.git"):
         assert not is_ssh_remote(remote), remote
+
+
+# ---------------------------------------------------------------- notes out of the box
+
+def test_notes_kept_on_this_machine_begin_by_themselves_and_are_written_without_a_remote(tmp_path):
+    repo = BrainRepo(tmp_path / "state" / "notes" / "repo", "", local=True)
+    run(repo.start())
+    assert repo.ready and repo.detail.endswith("(kept on this machine only)"), repo.detail
+    assert repo.notes() == ["README.md"] and "Jarvis's notes" in repo.read("README.md")
+    commit = run(repo.save({"wiki/printer.md": "# Printer\n\nTwo trays.\n"}, "printer"))
+    assert commit and "Two trays" in repo.read("wiki/printer.md") and not repo.can_push
+    assert not list((tmp_path / "state" / "notes").glob(".begin-*")), "nothing half made is left beside it"
+    run(repo.start())   # a second start leaves them as they are
+    assert repo.ready and "Two trays" in repo.read("wiki/printer.md")
+
+
+def test_an_empty_remote_gets_the_first_note_and_is_used(tmp_path):
+    bare = tmp_path / "empty.git"
+    git("init", "-q", "--bare", "-b", "main", str(bare), cwd=tmp_path)
+    repo = BrainRepo(tmp_path / "state" / "notes" / "repo", str(bare))
+    run(repo.start())
+    assert repo.ready and repo.detail.startswith("main at") and "this machine only" not in repo.detail, repo.detail
+    assert "Jarvis's notes" in git("show", "main:README.md", cwd=bare)
+
+
+def test_a_remote_without_main_is_said(tmp_path):
+    bare, seed = tmp_path / "other.git", tmp_path / "seed"
+    git("init", "-q", "--bare", "-b", "trunk", str(bare), cwd=tmp_path)
+    git("init", "-q", "-b", "trunk", str(seed), cwd=tmp_path)
+    (seed / "a.md").write_text("a\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-q", "-m", "a", cwd=seed)
+    git("push", "-q", str(bare), "trunk", cwd=seed)
+    repo = BrainRepo(tmp_path / "state" / "notes" / "repo", str(bare))
+    run(repo.start())
+    assert not repo.ready and "has no branch main" in repo.detail
+
+
+def test_notes_kept_on_this_machine_move_to_a_remote_named_later_when_it_is_empty(tmp_path, origin):
+    place = tmp_path / "state" / "notes" / "repo"
+    local = BrainRepo(place, "", local=True)
+    run(local.start())
+    run(local.save({"wiki/printer.md": "# Printer\n\nTwo trays.\n"}, "printer"))
+    head = git("rev-parse", "main", cwd=place)
+    # A remote with notes of its own: nothing is mixed, and the owner is told what to do.
+    clash = BrainRepo(place, str(origin))
+    run(clash.start())
+    assert not clash.ready and "already has notes of its own" in clash.detail
+    assert git("rev-parse", "main", cwd=place) == head
+    # An empty one: the notes go there, history and all, and are kept in step from then on.
+    empty = tmp_path / "empty.git"
+    git("init", "-q", "--bare", "-b", "main", str(empty), cwd=tmp_path)
+    moved = BrainRepo(place, str(empty))
+    run(moved.start())
+    assert moved.ready and git("rev-parse", "main", cwd=empty) == head
+    run(moved.save({"wiki/garden.md": "# Garden\n\nBeans.\n"}, "garden"))
+    assert "Beans" in git("show", "main:wiki/garden.md", cwd=empty)
+
+
+def test_jarvis_keeps_its_notes_on_its_own_machine_when_the_vault_names_none(tmp_path):
+    from fakes import FakeOllama
+
+    from jarvis.config import Settings
+    from jarvis.core import Jarvis
+
+    def jarvis(local):
+        config = Settings(data_dir=tmp_path / f"data-{local}", site=tmp_path / "site.env", env_dir=tmp_path / "secrets",
+                          trust_dir=tmp_path / "trust", notes_local=local)
+        return Jarvis(config, FakeOllama().client())
+
+    off = jarvis(False)
+    assert off.lab.get("notes") != "" and not any(n.startswith("notes_") for n in off.tools.names())
+    run(off.close())
+    on = jarvis(True)
+    assert on.lab.get("notes") == "" and {"notes_search", "notes_read", "note_add"} <= set(on.tools.names())
+
+    async def started():
+        await on.notes.start()
+        return on.notes.ready, on.notes.detail
+
+    ready, detail = run(started())
+    assert ready and detail.endswith("(kept on this machine only)"), detail
+    run(on.close())
+
+
+def test_a_move_to_a_remote_that_fails_is_tried_again_and_never_mixes_two_histories(tmp_path):
+    place = tmp_path / "state" / "notes" / "repo"
+    local = BrainRepo(place, "", local=True)
+    run(local.start())
+    run(local.save({"wiki/a.md": "# A\n\nmine\n"}, "a"))
+    empty = tmp_path / "empty.git"
+    git("init", "-q", "--bare", "-b", "main", str(empty), cwd=tmp_path)
+    hook = empty / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    refused = BrainRepo(place, str(empty))
+    run(refused.start())
+    assert not refused.ready or refused.detail.startswith("local copy only")
+    assert subprocess.run(["git", "-C", str(place), "config", "--get", "remote.origin.url"], capture_output=True).returncode != 0, \
+        "a push that failed sets no origin"
+    # Someone else's notes land there meanwhile: they are not mixed with these.
+    other = tmp_path / "other"
+    git("init", "-q", "-b", "main", str(other), cwd=tmp_path)
+    (other / "theirs.md").write_text("theirs\n")
+    git("add", "-A", cwd=other)
+    git("commit", "-q", "-m", "theirs", cwd=other)
+    hook.unlink()
+    git("push", "-q", str(empty), "main", cwd=other)
+    again = BrainRepo(place, str(empty))
+    run(again.start())
+    assert not again.ready and "already has notes of its own" in again.detail
+    assert "mine" not in git("log", "--all", "--format=%s", cwd=empty) and git("log", "--format=%s", cwd=empty) == "theirs"
+
+
+def test_notes_from_another_history_are_never_pulled_into_a_clone(tmp_path, origin):
+    repo = make_repo(tmp_path, origin)
+    stranger = tmp_path / "stranger"
+    git("init", "-q", "-b", "main", str(stranger), cwd=tmp_path)
+    (stranger / "x.md").write_text("x\n")
+    git("add", "-A", cwd=stranger)
+    git("commit", "-q", "-m", "x", cwd=stranger)
+    git("push", "-q", "--force", str(origin), "main", cwd=stranger)   # the remote's main replaced by an unrelated one
+    with pytest.raises(BrainError, match="no history in common"):
+        run(repo.save({"wiki/b.md": "# B\n\nb\n"}, "b"))
+    assert git("log", "--format=%s", cwd=origin) == "x", "nothing was pushed onto it"
+
+
+def test_a_clone_the_vault_no_longer_names_is_not_taken_for_notes_kept_here(tmp_path, origin):
+    make_repo(tmp_path, origin)
+    alone = BrainRepo(tmp_path / "state" / "notes" / "repo", "", local=True)
+    run(alone.start())
+    assert not alone.ready and "no longer names" in alone.detail
