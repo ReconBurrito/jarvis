@@ -34,3 +34,15 @@ def test_a_page_that_asks_for_too_many_names_gets_no_more_lookups():
     assert [run(resolver.allowed(f"https://h{n}.test/")) for n in range(5)] == [True, True, True, False, False]
     assert len(asked) == 3 and resolver.capped
     assert run(resolver.allowed("https://h1.test/again")) is True, "a host already known is still answered"
+
+
+def test_jarviss_start_page_is_listed_by_name_and_other_local_pages_are_not():
+    from jarvis.browser.tools import START_PAGE, Browser
+
+    async def lookup(host):
+        return []
+
+    browser = Browser(door=None, resolver=Resolver(lookup))
+    assert run(browser._private(START_PAGE, Resolver(lookup))) is False
+    for url in ("file:///etc/hostname", "file:///opt/jarvis-desktop/home.html?x", "chrome://settings/", "view-source:" + START_PAGE):
+        assert run(browser._private(url, Resolver(lookup))) is True, url

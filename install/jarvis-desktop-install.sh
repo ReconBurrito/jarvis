@@ -69,7 +69,7 @@ DOOR_NAME=jarvis-door.invalid               # the one name in the door's certifi
 DOOR_USER=jarvis-door
 DOOR_UNIT=/etc/systemd/system/jarvis-door.service
 APP_FILES=(chromium bwrap jarvis-session.sh jarvis-session.desktop panel.html home.html Oxanium.ttf
-    Oxanium-LICENSE.txt icon.png sandbox-check.sh session-check.sh browser-kept)
+    Oxanium-LICENSE.txt icon.png favicon.ico sandbox-check.sh session-check.sh browser-kept)
 
 # The settings come from a file a person can edit; they end up in a firewall rule and a Docker file.
 [[ "$IMAGE" =~ ^[a-z0-9./-]+@sha256:[0-9a-f]{64}$ ]] || die "desktop/image does not name an image by its digest."
@@ -310,6 +310,7 @@ compose_file() {
         "      - $DEST/app/jarvis-session.desktop:/etc/xdg/autostart/jarvis-session.desktop:ro" \
         "      # The picture a viewer's browser shows in its tab." \
         "      - $DEST/app/icon.png:/usr/share/selkies/www/icon.png:ro" \
+        "      - $DEST/app/favicon.ico:/usr/share/selkies/www/favicon.ico:ro" \
         "      - $DEST/policies:/etc/chromium/policies/managed:ro"
 }
 

@@ -111,6 +111,7 @@ def test_install_sets_up_firewall_files_and_desktop(bench):
                  "      - /opt/jarvis-desktop/app/bwrap:/usr/bin/bwrap:ro",
                  "      - /opt/jarvis-desktop/app/jarvis-session.desktop:/etc/xdg/autostart/jarvis-session.desktop:ro",
                  "      - /opt/jarvis-desktop/app/icon.png:/usr/share/selkies/www/icon.png:ro",
+                 "      - /opt/jarvis-desktop/app/favicon.ico:/usr/share/selkies/www/favicon.ico:ro",
                  "      - /opt/jarvis-desktop/policies:/etc/chromium/policies/managed:ro"):
         assert line + "\n" in compose, line
     assert "devices:" not in compose and "DRI" not in compose and "ports:" not in compose
@@ -119,7 +120,7 @@ def test_install_sets_up_firewall_files_and_desktop(bench):
 
     files = bench.sh("cd /opt/jarvis-desktop && stat -c '%a %u:%g %n' app/* policies/* browser config").stdout.splitlines()
     assert files == ["644 0:0 app/Oxanium-LICENSE.txt", "644 0:0 app/Oxanium.ttf", "644 0:0 app/brain.js", "644 0:0 app/browser-kept", "755 0:0 app/bwrap",
-                     "755 0:0 app/chromium", "644 0:0 app/home.html", "644 0:0 app/icon.png",
+                     "755 0:0 app/chromium", "644 0:0 app/favicon.ico", "644 0:0 app/home.html", "644 0:0 app/icon.png",
                      "644 0:0 app/jarvis-session.desktop", "755 0:0 app/jarvis-session.sh", "644 0:0 app/panel.html",
                      "755 0:0 app/sandbox-check.sh", "755 0:0 app/session-check.sh", "644 0:0 policies/jarvis.json",
                      "700 1001:1001 browser", "755 1000:1000 config"], files
@@ -154,7 +155,7 @@ def test_the_docker_file_is_what_docker_will_read(bench):
     assert service["environment"] == {
         "PUID": "1000", "PGID": "1000", "TZ": service["environment"]["TZ"], "TITLE": "Jarvis", "START_DOCKER": "false",
         "SELKIES_COMMAND_ENABLED": "false", "DISABLE_SUDO": "true", "SELKIES_ALLOWED_ORIGINS": ORIGIN}
-    assert len(service["labels"]["jarvis.files"]) == 16 and len(service["volumes"]) == 9
+    assert len(service["labels"]["jarvis.files"]) == 16 and len(service["volumes"]) == 10
     assert set(service) == {"image", "container_name", "labels", "network_mode", "shm_size", "security_opt", "restart",
                             "environment", "volumes"}
 
