@@ -317,8 +317,9 @@ class Files:
         before = self._before(real) if existed else None
         if before is not None and not before["utf8"]:
             raise Refused(f"{path} is not UTF-8 text; it is not written over")
-        if expect and (before is None or before["sha256"] != expect):
-            raise Refused(f"{path} changed since it was read (or does not exist); read it again first")
+        # A version to expect guards what is there; for a new file there is nothing to lose, so it does not count.
+        if expect and before is not None and before["sha256"] != expect:
+            raise Refused(f"{path} changed since it was read; read it again first")
         if before is not None:
             info = os.stat(real)
             uid, gid, perm = info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)

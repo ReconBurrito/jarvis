@@ -100,6 +100,9 @@ def test_every_change_can_be_undone_and_keys_are_never_written(machine):
     assert "kept from Jarvis" in files.handle({"op": "delete", "path": "/etc/shadow"})["error"]
     link = files.handle({"op": "delete", "path": "/opt/app/sneaky"})
     assert "kept from Jarvis" in link["error"], "a link to a key is left alone too"
+    fresh = files.handle({"op": "write", "path": "/opt/app/fresh.txt", "content": "x\n", "expect": "made-up"})
+    assert fresh["created"], "a new file has nothing to lose, so a version to expect does not stop it"
+    assert files.handle({"op": "undo", "change": fresh["change"]})["done"]
 
 
 def test_the_tools_talk_to_jarvis_fsd_over_its_socket_and_strangers_are_refused(machine, tmp_path):

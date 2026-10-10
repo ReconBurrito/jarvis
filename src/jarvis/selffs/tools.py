@@ -92,15 +92,16 @@ def make_selffs_tools(files: SelfFiles) -> list[Tool]:
                  "name": {"type": "string", "description": "File name pattern, such as *.service"},
                  "contains": {"type": "string", "description": "Text the file must contain"}},
                  "required": ["path"]}, tier=TIER_READ_ONLY, handler=fs_find),
-        Tool(name="fs_write", description="Write a whole text file on your own machine, replacing what is there (read it "
-                                          "first and pass its sha256 as expect_sha256 so a change made meanwhile is not lost). "
+        Tool(name="fs_write", description="Write a whole text file on your own machine: a new file, or one that replaces what "
+                                          "is there. To replace a file, read it first and pass the sha256 fs_read gave as "
+                                          "expect_sha256, so a change made meanwhile is not lost; for a new file leave it out. "
                                           "The file keeps its owner and mode unless mode is given. Every write can be undone "
                                           "with fs_undo. Only do this when the owner asked for the change.",
              parameters={"type": "object", "properties": {
                  "path": {"type": "string", "description": "Full path of the file"},
                  "content": {"type": "string", "description": "The file's whole new text"},
                  "mode": {"type": "string", "description": "Octal mode for the file, such as 644 (optional)"},
-                 "expect_sha256": {"type": "string", "description": "The sha256 fs_read gave for the file"}},
+                 "expect_sha256": {"type": "string", "description": "Only when replacing a file: the sha256 fs_read gave for it"}},
                  "required": ["path", "content"]}, tier=TIER_READ_ONLY, handler=fs_write, private=("content",)),
         Tool(name="fs_mkdir", description="Make a folder on your own machine.", parameters=path_only("Full path of the new folder"),
              tier=TIER_READ_ONLY, handler=fs_mkdir),
